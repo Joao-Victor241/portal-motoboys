@@ -1,0 +1,7 @@
+streamlit>=1.40
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+requests>=2.32
+bcrypt>=4.2
+anthropic>=0.69
+pydantic>=2.0
