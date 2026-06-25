@@ -162,6 +162,9 @@ class DMPClient:
                     "valido_ate": fim}
 
         # 1) Cria a credencial (validade conforme o tipo do motoboy).
+        # IsCredentialPublic=True + OrganizationalStructure=0 são ESSENCIAIS para
+        # a credencial ser distribuída a todas as leitoras (validado contra o
+        # cadastro do RENATO, que funciona, e confirmado pelo exemplo da Dimep).
         corpo_cred = {
             "CredentialType": 1,                       # PESSOA
             "TechnologyType": 3,                        # Proximity
@@ -169,8 +172,8 @@ class DMPClient:
             "CredentialStatus": 0,                      # Válida
             "MasterType": 0,                            # Não master
             "Number": numero,
-            "OrganizationalStructure": self.org_structure,
-            "IsCredentialPublic": False,
+            "OrganizationalStructure": 0,              # 0 = pública/global (chega nas leitoras)
+            "IsCredentialPublic": True,
             "IsEquipmentSupervisor": False,
         }
         if temporaria:
