@@ -377,11 +377,17 @@ def tela_ol(usuario):
                 conn.close(); st.stop()
 
             # Registra no DMP (reconhecimento facial — sem loja).
+            # Para free, a credencial herda a validade (valido_ate); fixo = permanente.
             aviso_dmp = None
             try:
-                pessoa = dmp.cadastrar_pessoa(cpf=cpf_limpo, nome=nome.strip())
+                pessoa = dmp.cadastrar_pessoa(
+                    cpf=cpf_limpo, nome=nome.strip(),
+                    valido_ate=str(valido_ate) if (tipo == "free" and valido_ate) else None)
                 conn.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
                              (pessoa.get("Id"), motoboy_id))
+                if pessoa.get("credencial_face_ok") is False:
+                    aviso_dmp = ("pessoa criada, mas a credencial facial falhou: "
+                                 + pessoa.get("credencial_face_erro", ""))
             except Exception as erro:
                 aviso_dmp = str(erro)
 
@@ -565,6 +571,14 @@ def tela_ol(usuario):
                     db.auditar(conn, usuario["id"], "editar_cadastro",
                                "motoboy", mb["motoboy_id"], mb["nome"])
                     conn.commit()
+
+                    # Atualiza a validade da credencial facial no DMP conforme o tipo.
+                    try:
+                        nova_validade = (str(ed_valido_ate)
+                                         if ed_tipo == "free" and ed_valido_ate else None)
+                        dmp.criar_credencial_face(mb["cpf"], valido_ate=nova_validade)
+                    except Exception:
+                        pass  # não impede a edição local
 
                     # Limpa o estado do OCR deste motoboy
                     st.session_state.pop("ed_ocr_venc", None)

@@ -131,40 +131,61 @@ class DMPClient:
             corpo["Photo"] = foto_base64
         return corpo
 
-    def criar_credencial_face(self, cpf, person_id=None) -> dict:
+    @staticmethod
+    def _fim_do_dia(valido_ate) -> str | None:
+        """Converte 'AAAA-MM-DD' (ou date) no fim daquele dia em ISO. None se vazio."""
+        if not valido_ate:
+            return None
+        return f"{str(valido_ate)[:10]}T23:59:59"
+
+    def criar_credencial_face(self, cpf, person_id=None, valido_ate=None) -> dict:
         """
         Cria a credencial e a associa à pessoa para uso no FACE — passo
         obrigatório para o reconhecimento facial liberar a catraca.
 
         Replica o que é feito manualmente no DMP (aba Credenciais → "Adicionar"
         + "Credencial para uso no FACE"). Estrutura validada no cadastro do
-        Felipe DFControl:
-          - Credencial: tipo PESSOA (1), tecnologia Proximidade (3),
-            permanente, Number = CPF, estrutura 398.
-          - Associação: PersonId + CredentialNumber=CPF + ForFaceUse=true.
+        Felipe DFControl (tipo PESSOA=1, tecnologia Proximidade=3, Number=CPF,
+        estrutura 398) e confirmada pelo exemplo enviado pela Dimep.
+
+        Validade:
+          - valido_ate informado (motoboy FREE) → credencial TEMPORÁRIA, válida
+            até o fim daquele dia. A facial para de funcionar quando expira.
+          - valido_ate vazio (motoboy FIXO) → credencial PERMANENTE.
         Idempotente: se a credencial/associação já existir, não quebra.
         """
         numero = int("".join(filter(str.isdigit, str(cpf))))
+        fim = self._fim_do_dia(valido_ate)
+        temporaria = fim is not None
         if self.simulado:
-            return {"_simulado": True, "credencial": numero, "face": True}
+            return {"_simulado": True, "credencial": numero, "face": True,
+                    "valido_ate": fim}
 
-        # 1) Cria a credencial.
+        # 1) Cria a credencial (validade conforme o tipo do motoboy).
         corpo_cred = {
-            "CredentialType": 1,        # PESSOA
-            "TechnologyType": 3,        # Proximity
-            "DurationType": 1,          # Permanente
-            "CredentialStatus": 0,      # Válida
-            "MasterType": 0,            # Não master
+            "CredentialType": 1,                       # PESSOA
+            "TechnologyType": 3,                        # Proximity
+            "DurationType": 0 if temporaria else 1,    # 0=Temporária, 1=Permanente
+            "CredentialStatus": 0,                      # Válida
+            "MasterType": 0,                            # Não master
             "Number": numero,
             "OrganizationalStructure": self.org_structure,
             "IsCredentialPublic": False,
             "IsEquipmentSupervisor": False,
         }
+        if temporaria:
+            corpo_cred["ValidityBegin"] = datetime.now().isoformat(timespec="seconds")
+            corpo_cred["ValidityEnd"] = fim
         r1 = requests.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
                            headers=self._auth(), timeout=30)
         # 400/409 normalmente = já existe; só levanta para erros inesperados.
+        ja_existe = r1.status_code in (400, 409)
         if r1.status_code not in (200, 201, 204, 400, 409):
             r1.raise_for_status()
+        # Se já existia, atualiza a validade (caso o motoboy tenha mudado de prazo).
+        if ja_existe:
+            requests.put(f"{self.base_url}/api/v1/Credential/{numero}", json=corpo_cred,
+                         headers=self._auth(), timeout=30)
 
         # 2) Descobre o PersonId, se não foi passado.
         if person_id is None:
@@ -174,11 +195,12 @@ class DMPClient:
                 js = g.json()
                 person_id = (js[0] if isinstance(js, list) else js).get("Id")
 
-        # 3) Associa a credencial à pessoa, marcando uso no FACE.
+        # 3) Associa a credencial à pessoa, marcando uso no FACE (com prazo).
         corpo_assoc = {
             "PersonId": person_id,
             "CredentialNumber": numero,
             "InitialDate": datetime.now().isoformat(timespec="seconds"),
+            "FinalDate": fim,
             "ForREPUse": False,
             "ForFaceUse": True,
         }
@@ -186,16 +208,19 @@ class DMPClient:
                            json=corpo_assoc, headers=self._auth(), timeout=30)
         if r2.status_code not in (200, 201, 204, 400, 409):
             r2.raise_for_status()
-        return {"ok": True, "credencial": numero, "person_id": person_id, "face": True}
+        return {"ok": True, "credencial": numero, "person_id": person_id,
+                "face": True, "valido_ate": fim}
 
     def cadastrar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None,
                          telefone: str | None = None,
-                         com_credencial_face: bool = True) -> dict:
+                         com_credencial_face: bool = True,
+                         valido_ate=None) -> dict:
         """POST /api/v1/Person — cadastra o motoboy como ACESSO PERMITIDO, com foto se houver.
 
         Se com_credencial_face=True (padrão), já cria a credencial e associa
         para uso no FACE — assim o motoboy fica pronto para o reconhecimento
-        facial assim que enviar a selfie.
+        facial assim que enviar a selfie. valido_ate (motoboy FREE) define a
+        validade da credencial; vazio = permanente (FIXO).
         """
         foto_b64 = base64.b64encode(foto_bytes).decode() if foto_bytes else None
         corpo = self._montar_pessoa(cpf, nome, foto_b64, telefone, self.situ_permitido)
@@ -216,7 +241,8 @@ class DMPClient:
         # Cria a credencial + associação FACE (não impede o cadastro se falhar).
         if com_credencial_face:
             try:
-                self.criar_credencial_face(cpf, person_id=pessoa.get("Id"))
+                self.criar_credencial_face(cpf, person_id=pessoa.get("Id"),
+                                           valido_ate=valido_ate)
                 pessoa["credencial_face_ok"] = True
             except Exception as e:
                 pessoa["credencial_face_ok"] = False
