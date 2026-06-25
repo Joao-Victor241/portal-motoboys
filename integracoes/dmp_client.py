@@ -75,6 +75,7 @@ class DMPClient:
             "base_url": self.base_url,
             "username": self.username,
             "tem_nak": bool(self.nak),
+            "nak_len": len(self.nak or ""),
             "ok": False,
             "user_name": None,
             "expira_em": None,

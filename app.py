@@ -892,9 +892,10 @@ def tela_admin(usuario):
                         "e, se persistir, peça à DIMEP para liberar o IP do Streamlit Cloud."
                     )
             # Mostra o que o servidor enxerga (sem expor segredos).
+            nak_ok = "✅ 489 (íntegro)" if diag.get("nak_len") == 489 else f"⚠️ {diag.get('nak_len')} (esperado 489)"
             st.caption(
                 f"Base: `{diag['base_url']}` · Usuário: `{diag['username']}` · "
-                f"NAK configurado: {'sim' if diag['tem_nak'] else 'NÃO'}"
+                f"Tamanho do NAK recebido: {nak_ok}"
             )
 
     aba_ols, aba_lim, aba_bloq, aba_base, aba_rel = st.tabs(
