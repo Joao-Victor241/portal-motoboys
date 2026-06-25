@@ -132,6 +132,21 @@ def _hash(senha: str) -> str:
     return bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
 
 
+# Senhas dos usuários padrão vêm dos Secrets/.env (nunca ficam no código).
+# Se a variável não estiver definida, cai no fallback (mantém funcionando).
+_MAPA_SENHA_ENV = {
+    "admin":      ("ADMIN_PASSWORD", "admin123"),
+    "ol_exemplo": ("OL_EXEMPLO_PASSWORD", "ol123"),
+    "operador":   ("OPERADOR_PASSWORD", "op123"),
+}
+_SENHAS_SINCRONIZADAS = False
+
+
+def _senha_padrao(login: str) -> str:
+    chave, fallback = _MAPA_SENHA_ENV[login]
+    return os.getenv(chave, fallback)
+
+
 # Nomes oficiais das lojas Kaizen (chave = código, valor = nome).
 LOJAS_KAIZEN = {
     "L01": "Kaizen - Asa Norte",
@@ -209,11 +224,23 @@ def inicializar():
             conn.execute("INSERT INTO ol_loja_limite (ol_id, loja_id, limite) VALUES (?,?,?)",
                          (ol_id, loja["id"], 10))
         conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
-                     ("admin", _hash("admin123"), "admin"))
+                     ("admin", _hash(_senha_padrao("admin")), "admin"))
         conn.execute("INSERT INTO usuarios (login, senha_hash, perfil, ol_id) VALUES (?,?,?,?)",
-                     ("ol_exemplo", _hash("ol123"), "ol", ol_id))
+                     ("ol_exemplo", _hash(_senha_padrao("ol_exemplo")), "ol", ol_id))
         conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
-                     ("operador", _hash("op123"), "operador"))
+                     ("operador", _hash(_senha_padrao("operador")), "operador"))
+
+    # Sincroniza as senhas dos usuários padrão com os Secrets (1x por processo).
+    # Só atualiza quando a variável de ambiente estiver definida — assim, definir
+    # ADMIN_PASSWORD/etc. nos Secrets passa a valer mesmo se o banco já existia.
+    global _SENHAS_SINCRONIZADAS
+    if not _SENHAS_SINCRONIZADAS:
+        for login, (chave, _fb) in _MAPA_SENHA_ENV.items():
+            if os.getenv(chave):
+                conn.execute("UPDATE usuarios SET senha_hash=? WHERE login=?",
+                             (_hash(_senha_padrao(login)), login))
+        _SENHAS_SINCRONIZADAS = True
+
     conn.commit()
     conn.close()
 

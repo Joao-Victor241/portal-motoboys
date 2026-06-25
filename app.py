@@ -8,7 +8,9 @@ de OLs) e esboço do painel do operador. Roda em modo SIMULADO para DMP/SIAC.
 Como rodar:
     pip install -r requirements.txt
     python -m streamlit run app.py
-Usuários de teste: admin/admin123  |  ol_exemplo/ol123  |  operador/op123
+Usuários: admin / ol_exemplo / operador. Senhas vêm dos Secrets/.env
+(ADMIN_PASSWORD, OL_EXEMPLO_PASSWORD, OPERADOR_PASSWORD); sem isso, caem
+nos fallbacks de desenvolvimento.
 """
 
 import os
@@ -186,7 +188,6 @@ def tela_login():
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
-    st.info("Teste: **admin/admin123** · **ol_exemplo/ol123** · **operador/op123**")
 
 
 # ===========================================================================
