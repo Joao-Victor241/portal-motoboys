@@ -64,6 +64,52 @@ class DMPClient:
             self.logon()
         return {"Authorization": f"Bearer {self._bearer}"}
 
+    def diagnostico(self) -> dict:
+        """
+        Testa a conexão com o DMP e devolve um relatório (sem levantar exceção).
+        Usado pelo painel admin para confirmar a integração ao vivo — inclusive
+        quando o app roda no Streamlit Cloud (IP/segredos diferentes do local).
+        """
+        info = {
+            "simulado": self.simulado,
+            "base_url": self.base_url,
+            "username": self.username,
+            "tem_nak": bool(self.nak),
+            "ok": False,
+            "user_name": None,
+            "expira_em": None,
+            "erro": None,
+        }
+        if self.simulado:
+            info["erro"] = "App está em MODO SIMULADO (DMP_SIMULADO != false)."
+            return info
+        try:
+            resp = requests.get(
+                f"{self.base_url}/api/v1/Logon",
+                params={"username": self.username, "password": self.password,
+                        "culture": "pt-BR"},
+                headers={"Authorization": f"NAK {self.nak}"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                dados = resp.json()
+                info["ok"] = True
+                info["user_name"] = dados.get("user_name")
+                info["expira_em"] = dados.get("expires")
+                # Conta quantas pessoas existem no DMP (sanity check do Bearer).
+                bearer = dados.get("access_token", "")
+                g = requests.get(
+                    f"{self.base_url}/api/v1/Person",
+                    headers={"Authorization": f"Bearer {bearer}"},
+                    params={"pageSize": 1, "pageIndex": 0}, timeout=30,
+                )
+                info["leitura_pessoas_ok"] = (g.status_code == 200)
+            else:
+                info["erro"] = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as ex:
+            info["erro"] = str(ex)
+        return info
+
     # ---- Cadastro de pessoa (motoboy) ------------------------------------
 
     def _montar_pessoa(self, cpf, nome, foto_base64, telefone, situacao) -> dict:

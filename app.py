@@ -857,6 +857,46 @@ def tela_admin(usuario):
     c4.metric("OLs ativas", tot_ols)
     c5.metric("Bloqueados permanentes", tot_bloq)
 
+    # --- Diagnóstico da integração com o DMP --------------------------------
+    estado_dmp = "🟡 Modo simulado" if SIMULADO else "🟢 Modo real (integrado)"
+    with st.expander(f"🔌 Integração DMP Access II — {estado_dmp}", expanded=False):
+        st.caption(
+            "Confirma se ESTE servidor (onde o portal está rodando) consegue "
+            "falar com o DMP. Útil para validar a integração na nuvem."
+        )
+        if st.button("Testar conexão com o DMP agora"):
+            with st.spinner("Conectando ao DMP..."):
+                diag = dmp.diagnostico()
+            if diag["ok"]:
+                st.success(
+                    f"✅ Conectado ao DMP como **{diag['user_name']}**. "
+                    f"Token válido até {diag['expira_em']}."
+                )
+                if diag.get("leitura_pessoas_ok"):
+                    st.caption("Leitura de pessoas (Bearer) também funcionou. ✔")
+                else:
+                    st.warning("Logon OK, mas a leitura de pessoas falhou "
+                               "(pode ser permissão do perfil).")
+            elif diag["simulado"]:
+                st.warning(
+                    "🟡 O portal está em **modo simulado** — não escreve no DMP. "
+                    "Para integrar de verdade, defina `DMP_SIMULADO=false` "
+                    "nos Secrets do Streamlit Cloud e reinicie o app."
+                )
+            else:
+                st.error(f"❌ Falha ao conectar ao DMP: {diag['erro']}")
+                if diag["erro"] and ("401" in diag["erro"] or "denied" in diag["erro"].lower()):
+                    st.caption(
+                        "401 = credenciais erradas OU o IP deste servidor não está "
+                        "liberado no DMP. Confira o `DMP_NAK`/`DMP_PASSWORD` nos Secrets "
+                        "e, se persistir, peça à DIMEP para liberar o IP do Streamlit Cloud."
+                    )
+            # Mostra o que o servidor enxerga (sem expor segredos).
+            st.caption(
+                f"Base: `{diag['base_url']}` · Usuário: `{diag['username']}` · "
+                f"NAK configurado: {'sim' if diag['tem_nak'] else 'NÃO'}"
+            )
+
     aba_ols, aba_lim, aba_bloq, aba_base, aba_rel = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
          "Base completa", "📊 Relatórios"])
