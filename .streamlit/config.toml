@@ -1,0 +1,14 @@
+# Configuração do Streamlit (sem segredos — pode ir para o Git).
+[theme]
+primaryColor = "#E30613"          # vermelho Kaizen
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F5"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+# Coleta de uso desativada.
+headless = true
+
+[browser]
+gatherUsageStats = false

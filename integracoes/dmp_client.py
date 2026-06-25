@@ -113,8 +113,20 @@ class DMPClient:
         resp.raise_for_status()
         return {"ok": True}
 
+    def liberar_pessoa(self, cpf, nome) -> dict:
+        """PUT /api/v1/Person com PersonSituation = ACESSO PERMITIDO (10). Usa na reativação."""
+        corpo = self._montar_pessoa(cpf, nome, None, None, self.situ_permitido)
+        if self.simulado:
+            return {"_simulado": True, "situacao": self.situ_permitido}
+        resp = requests.put(f"{self.base_url}/api/v1/Person", json=corpo,
+                            headers=self._auth(), timeout=30)
+        resp.raise_for_status()
+        return {"ok": True}
+
     def bloquear_pessoa(self, cpf, nome) -> dict:
         """PUT /api/v1/Person com PersonSituation = ACESSO BLOQUEADO (11)."""
+        # PersonSituation é GLOBAL — bloqueia em todas as lojas/equipamentos.
+        # Só chamar quando o motoboy não tiver mais nenhum acesso ativo.
         corpo = self._montar_pessoa(cpf, nome, None, None, self.situ_bloqueado)
         if self.simulado:
             return {"_simulado": True, "situacao": self.situ_bloqueado}
