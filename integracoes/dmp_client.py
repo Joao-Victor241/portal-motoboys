@@ -22,6 +22,7 @@ import os
 import time
 import base64
 import requests
+from datetime import datetime
 
 
 class DMPClient:
@@ -130,24 +131,97 @@ class DMPClient:
             corpo["Photo"] = foto_base64
         return corpo
 
+    def criar_credencial_face(self, cpf, person_id=None) -> dict:
+        """
+        Cria a credencial e a associa à pessoa para uso no FACE — passo
+        obrigatório para o reconhecimento facial liberar a catraca.
+
+        Replica o que é feito manualmente no DMP (aba Credenciais → "Adicionar"
+        + "Credencial para uso no FACE"). Estrutura validada no cadastro do
+        Felipe DFControl:
+          - Credencial: tipo PESSOA (1), tecnologia Proximidade (3),
+            permanente, Number = CPF, estrutura 398.
+          - Associação: PersonId + CredentialNumber=CPF + ForFaceUse=true.
+        Idempotente: se a credencial/associação já existir, não quebra.
+        """
+        numero = int("".join(filter(str.isdigit, str(cpf))))
+        if self.simulado:
+            return {"_simulado": True, "credencial": numero, "face": True}
+
+        # 1) Cria a credencial.
+        corpo_cred = {
+            "CredentialType": 1,        # PESSOA
+            "TechnologyType": 3,        # Proximity
+            "DurationType": 1,          # Permanente
+            "CredentialStatus": 0,      # Válida
+            "MasterType": 0,            # Não master
+            "Number": numero,
+            "OrganizationalStructure": self.org_structure,
+            "IsCredentialPublic": False,
+            "IsEquipmentSupervisor": False,
+        }
+        r1 = requests.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
+                           headers=self._auth(), timeout=30)
+        # 400/409 normalmente = já existe; só levanta para erros inesperados.
+        if r1.status_code not in (200, 201, 204, 400, 409):
+            r1.raise_for_status()
+
+        # 2) Descobre o PersonId, se não foi passado.
+        if person_id is None:
+            g = requests.get(f"{self.base_url}/api/v1/Person/{numero}",
+                             headers=self._auth(), timeout=30)
+            if g.status_code == 200 and g.json():
+                js = g.json()
+                person_id = (js[0] if isinstance(js, list) else js).get("Id")
+
+        # 3) Associa a credencial à pessoa, marcando uso no FACE.
+        corpo_assoc = {
+            "PersonId": person_id,
+            "CredentialNumber": numero,
+            "InitialDate": datetime.now().isoformat(timespec="seconds"),
+            "ForREPUse": False,
+            "ForFaceUse": True,
+        }
+        r2 = requests.post(f"{self.base_url}/api/v1/PersonCredential/Association",
+                           json=corpo_assoc, headers=self._auth(), timeout=30)
+        if r2.status_code not in (200, 201, 204, 400, 409):
+            r2.raise_for_status()
+        return {"ok": True, "credencial": numero, "person_id": person_id, "face": True}
+
     def cadastrar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None,
-                         telefone: str | None = None) -> dict:
-        """POST /api/v1/Person — cadastra o motoboy como ACESSO PERMITIDO, com foto se houver."""
+                         telefone: str | None = None,
+                         com_credencial_face: bool = True) -> dict:
+        """POST /api/v1/Person — cadastra o motoboy como ACESSO PERMITIDO, com foto se houver.
+
+        Se com_credencial_face=True (padrão), já cria a credencial e associa
+        para uso no FACE — assim o motoboy fica pronto para o reconhecimento
+        facial assim que enviar a selfie.
+        """
         foto_b64 = base64.b64encode(foto_bytes).decode() if foto_bytes else None
         corpo = self._montar_pessoa(cpf, nome, foto_b64, telefone, self.situ_permitido)
         if self.simulado:
-            return {"Id": corpo["RegistrationNumber"], "_simulado": True}
+            return {"Id": corpo["RegistrationNumber"], "_simulado": True,
+                    "credencial_face_ok": True}
         resp = requests.post(f"{self.base_url}/api/v1/Person", json=corpo,
                              headers=self._auth(), timeout=30)
         resp.raise_for_status()
         # O POST ecoa o corpo (Id=0). Buscamos o registro para pegar o Id real do DMP.
         reg = corpo["RegistrationNumber"]
+        pessoa = corpo
         g = requests.get(f"{self.base_url}/api/v1/Person/{reg}",
                          headers=self._auth(), timeout=30)
         if g.status_code == 200 and g.json():
             js = g.json()
-            return js[0] if isinstance(js, list) else js
-        return corpo
+            pessoa = js[0] if isinstance(js, list) else js
+        # Cria a credencial + associação FACE (não impede o cadastro se falhar).
+        if com_credencial_face:
+            try:
+                self.criar_credencial_face(cpf, person_id=pessoa.get("Id"))
+                pessoa["credencial_face_ok"] = True
+            except Exception as e:
+                pessoa["credencial_face_ok"] = False
+                pessoa["credencial_face_erro"] = str(e)
+        return pessoa
 
     def atualizar_foto(self, cpf, nome, foto_bytes: bytes) -> dict:
         """PUT /api/v1/Person — atualiza a pessoa com a foto (selfie) enviada pelo motoboy."""
