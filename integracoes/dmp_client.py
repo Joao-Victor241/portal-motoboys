@@ -143,10 +143,24 @@ class DMPClient:
 
     @staticmethod
     def _fim_do_dia(valido_ate) -> str | None:
-        """Converte 'AAAA-MM-DD' (ou date) no fim daquele dia em ISO. None se vazio."""
+        """Converte 'AAAA-MM-DD' (ou date) nas 18:30 daquele dia em ISO. None se vazio.
+        18:30 é o horário de corte oficial dos motoboys free."""
         if not valido_ate:
             return None
-        return f"{str(valido_ate)[:10]}T23:59:59"
+        return f"{str(valido_ate)[:10]}T18:30:00"
+
+    def _situacao_atual(self, cpf):
+        """Lê a PersonSituation atual da pessoa no DMP (None se não achar)."""
+        try:
+            numero = int("".join(filter(str.isdigit, str(cpf))))
+            g = requests.get(f"{self.base_url}/api/v1/Person/{numero}",
+                             headers=self._auth(), timeout=30)
+            if g.status_code == 200 and g.json():
+                js = g.json()
+                return (js[0] if isinstance(js, list) else js).get("PersonSituation")
+        except Exception:
+            pass
+        return None
 
     def criar_credencial_face(self, cpf, person_id=None, valido_ate=None) -> dict:
         """
@@ -227,16 +241,21 @@ class DMPClient:
     def cadastrar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None,
                          telefone: str | None = None,
                          com_credencial_face: bool = True,
-                         valido_ate=None) -> dict:
-        """POST /api/v1/Person — cadastra o motoboy como ACESSO PERMITIDO, com foto se houver.
+                         valido_ate=None, liberado: bool = False) -> dict:
+        """POST /api/v1/Person — cadastra o motoboy no DMP.
+
+        liberado=False (padrão): entra BLOQUEADO (ACESSO BLOQUEADO). O cadastro
+        sozinho NÃO libera a catraca — só quando o acesso for ATIVADO em uma loja
+        (liberar_pessoa). liberado=True força ACESSO PERMITIDO de imediato.
 
         Se com_credencial_face=True (padrão), já cria a credencial e associa
-        para uso no FACE — assim o motoboy fica pronto para o reconhecimento
-        facial assim que enviar a selfie. valido_ate (motoboy FREE) define a
-        validade da credencial; vazio = permanente (FIXO).
+        para uso no FACE — a facial fica enrolada, mas só abre a catraca quando
+        a pessoa estiver PERMITIDA. valido_ate (FREE) define a validade da
+        credencial (até 18:30 daquele dia); vazio = permanente (FIXO).
         """
+        situacao = self.situ_permitido if liberado else self.situ_bloqueado
         foto_b64 = base64.b64encode(foto_bytes).decode() if foto_bytes else None
-        corpo = self._montar_pessoa(cpf, nome, foto_b64, telefone, self.situ_permitido)
+        corpo = self._montar_pessoa(cpf, nome, foto_b64, telefone, situacao)
         if self.simulado:
             return {"Id": corpo["RegistrationNumber"], "_simulado": True,
                     "credencial_face_ok": True}
@@ -263,11 +282,16 @@ class DMPClient:
         return pessoa
 
     def atualizar_foto(self, cpf, nome, foto_bytes: bytes) -> dict:
-        """PUT /api/v1/Person — atualiza a pessoa com a foto (selfie) enviada pelo motoboy."""
+        """PUT /api/v1/Person — atualiza a pessoa com a foto (selfie) enviada pelo motoboy.
+        Preserva a situação de acesso atual: enviar a selfie NÃO libera a catraca
+        (se a pessoa está bloqueada/aguardando ativação, continua bloqueada)."""
         foto_b64 = base64.b64encode(foto_bytes).decode()
-        corpo = self._montar_pessoa(cpf, nome, foto_b64, None, self.situ_permitido)
         if self.simulado:
             return {"_simulado": True, "bytes": len(foto_bytes)}
+        situacao = self._situacao_atual(cpf)
+        if situacao is None:
+            situacao = self.situ_bloqueado
+        corpo = self._montar_pessoa(cpf, nome, foto_b64, None, situacao)
         resp = requests.put(f"{self.base_url}/api/v1/Person", json=corpo,
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()

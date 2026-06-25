@@ -829,12 +829,20 @@ def tela_ol(usuario):
                                         db.auditar(conn, usuario["id"], "ativar_acesso",
                                                    "cadastro", r["motoboy_id"],
                                                    f"{r['nome']} → {loja_sel}")
-                                        # DMP: tenta liberar (PUT); se 404/erro tenta criar (POST).
+                                        # DMP: libera o acesso e garante a credencial
+                                        # facial com a validade certa (free = até 18:30
+                                        # do valido_ate; fixo = permanente).
+                                        val_cred = (str(r["valido_ate"])
+                                                    if r["tipo"] == "free" and r["valido_ate"]
+                                                    else None)
                                         try:
                                             dmp.liberar_pessoa(r["cpf"], r["nome"])
+                                            dmp.criar_credencial_face(r["cpf"], valido_ate=val_cred)
                                         except Exception:
                                             try:
-                                                dmp.cadastrar_pessoa(r["cpf"], r["nome"])
+                                                dmp.cadastrar_pessoa(r["cpf"], r["nome"],
+                                                                     valido_ate=val_cred,
+                                                                     liberado=True)
                                             except Exception:
                                                 pass
                                         conn.commit()
