@@ -282,6 +282,34 @@ class DMPClient:
         resp.raise_for_status()
         return {"ok": True}
 
+    def listar_cpfs(self) -> set:
+        """
+        Devolve o conjunto de identificadores das pessoas existentes no DMP
+        (CPF só dígitos e RegistrationNumber). Usado para sincronizar exclusões:
+        quem sumiu do DMP é removido do portal. Pagina a lista /Person.
+        """
+        if self.simulado:
+            return set()
+        ids = set()
+        page = 0
+        while page <= 50:  # trava de segurança (máx 50 páginas)
+            r = requests.get(f"{self.base_url}/api/v1/Person", headers=self._auth(),
+                             params={"pageSize": 200, "pageIndex": page}, timeout=30)
+            r.raise_for_status()
+            js = r.json()
+            pessoas = js if isinstance(js, list) else js.get("items", js.get("Items", []))
+            if not pessoas:
+                break
+            for p in pessoas:
+                if p.get("Cpf"):
+                    ids.add("".join(filter(str.isdigit, str(p["Cpf"]))))
+                if p.get("RegistrationNumber"):
+                    ids.add(str(int(p["RegistrationNumber"])))
+            if len(pessoas) < 200:
+                break
+            page += 1
+        return ids
+
     # ---- Eventos de acesso (entrada/saída) p/ fila FIFO -------------------
 
     def ler_acessos_desde(self, ponteiro: int) -> list[dict]:

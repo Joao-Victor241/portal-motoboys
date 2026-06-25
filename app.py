@@ -95,6 +95,60 @@ def _desativar_free_vencidos():
         conn.close()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cpfs_no_dmp_cache():
+    """
+    Conjunto de CPFs/matrículas existentes no DMP, cacheado por 60s (evita
+    bater na API a cada interação). Retorna None se falhar ou estiver simulado
+    — None é tratado como 'não sincronizar' (segurança contra exclusão em massa).
+    """
+    if SIMULADO:
+        return None
+    try:
+        ids = dmp.listar_cpfs()
+        return ids if ids else None
+    except Exception:
+        return None
+
+
+def _sincronizar_exclusoes_dmp():
+    """
+    Remove do portal os motoboys que foram EXCLUÍDOS no DMP — assim, apagar
+    no DMP reflete no Streamlit.
+
+    Segurança contra remoção indevida:
+      - só age se a leitura do DMP teve sucesso e retornou pessoas;
+      - só remove quem já foi enviado ao DMP (dmp_person_id setado);
+      - só remove cadastros com mais de 2 min (evita apagar recém-criado
+        antes do cache do DMP atualizar).
+    """
+    ids = _cpfs_no_dmp_cache()
+    if not ids:
+        return
+    conn = db.conectar()
+    try:
+        candidatos = conn.execute(
+            "SELECT id, cpf, nome FROM motoboys "
+            "WHERE dmp_person_id IS NOT NULL "
+            "AND criado_em < datetime('now', '-2 minutes')"
+        ).fetchall()
+        removidos = []
+        for m in candidatos:
+            cpf_digitos = "".join(filter(str.isdigit, str(m["cpf"])))
+            if cpf_digitos and cpf_digitos not in ids:
+                conn.execute("DELETE FROM cadastros WHERE motoboy_id=?", (m["id"],))
+                conn.execute("DELETE FROM motoboys_ol WHERE motoboy_id=?", (m["id"],))
+                conn.execute("DELETE FROM selfie_links WHERE motoboy_id=?", (m["id"],))
+                conn.execute("DELETE FROM motoboys WHERE id=?", (m["id"],))
+                db.auditar(conn, None, "exclusao_sincronizada_dmp", "motoboy",
+                           m["id"], f"{m['nome']} — removido (excluído no DMP)")
+                removidos.append(m["nome"])
+        if removidos:
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def _data(valor):
     """Converte 'AAAA-MM-DD' (texto) em date; devolve None se não der."""
     if not valor:
@@ -394,6 +448,8 @@ def tela_ol(usuario):
             link = gerar_link_selfie(conn, motoboy_id)
             db.auditar(conn, usuario["id"], "cadastro_motoboy", "motoboy", motoboy_id, nome.strip())
             conn.commit()
+            # Atualiza o cache de CPFs do DMP para não remover o recém-cadastrado.
+            _cpfs_no_dmp_cache.clear()
 
             st.success(f"✅ {nome.strip()} cadastrado com sucesso!")
             st.info("Agora vá em **Meus motoboys** para ativar este motoboy em uma loja.")
@@ -911,6 +967,28 @@ def tela_admin(usuario):
                 f"Base: `{diag['base_url']}` · Usuário: `{diag['username']}` · "
                 f"Tamanho do NAK recebido: {nak_ok}"
             )
+
+        st.divider()
+        st.caption(
+            "**Sincronizar exclusões:** remove do portal os motoboys que foram "
+            "apagados no DMP. Roda sozinho a cada minuto; use o botão para forçar agora."
+        )
+        if st.button("🔄 Sincronizar exclusões do DMP agora"):
+            _cpfs_no_dmp_cache.clear()
+            ids = _cpfs_no_dmp_cache()
+            if not ids:
+                st.warning("Não consegui ler a lista do DMP agora (ou está simulado). "
+                           "Nada foi removido.")
+            else:
+                antes = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
+                _sincronizar_exclusoes_dmp()
+                depois = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
+                n = antes - depois
+                if n > 0:
+                    st.success(f"✅ {n} motoboy(s) removido(s) do portal (excluídos no DMP).")
+                    st.rerun()
+                else:
+                    st.info("Nada para remover — portal e DMP já estão sincronizados.")
 
     aba_ols, aba_lim, aba_bloq, aba_base, aba_rel = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
@@ -1622,6 +1700,8 @@ def main():
 
     # Roda a cada carregamento: suspende acesso de motoboys free vencidos às 18:30.
     _desativar_free_vencidos()
+    # Sincroniza exclusões: quem foi apagado no DMP some do portal também.
+    _sincronizar_exclusoes_dmp()
 
     if "usuario" not in st.session_state:
         tela_login()
