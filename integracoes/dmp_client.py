@@ -22,7 +22,17 @@ import os
 import time
 import base64
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# Fuso de Brasília (UTC-3, sem horário de verão desde 2019). Usado para os
+# horários enviados ao DMP — senão, na nuvem (servidor em UTC) ficariam +3h.
+FUSO_BR = timezone(timedelta(hours=-3))
+
+
+def _agora_br_iso() -> str:
+    """Horário atual de Brasília em ISO sem fuso (ex.: 2026-06-25T16:14:45),
+    no mesmo formato que o DMP grava (naive, hora local)."""
+    return datetime.now(FUSO_BR).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 class DMPClient:
@@ -177,7 +187,7 @@ class DMPClient:
             "IsEquipmentSupervisor": False,
         }
         if temporaria:
-            corpo_cred["ValidityBegin"] = datetime.now().isoformat(timespec="seconds")
+            corpo_cred["ValidityBegin"] = _agora_br_iso()
             corpo_cred["ValidityEnd"] = fim
         r1 = requests.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
                            headers=self._auth(), timeout=30)
@@ -202,7 +212,7 @@ class DMPClient:
         corpo_assoc = {
             "PersonId": person_id,
             "CredentialNumber": numero,
-            "InitialDate": datetime.now().isoformat(timespec="seconds"),
+            "InitialDate": _agora_br_iso(),
             "FinalDate": fim,
             "ForREPUse": False,
             "ForFaceUse": True,
