@@ -228,6 +228,11 @@ def inicializar():
     for codigo, nome in LOJAS_KAIZEN.items():
         conn.execute("UPDATE lojas SET nome=? WHERE codigo=?", (nome, codigo))
 
+    # Correção pontual de nome (one-off, idempotente: só renomeia se ainda
+    # estiver com o nome antigo). Pedido manual — sem expor edição de nome na UI.
+    conn.execute(
+        "UPDATE motoboys SET nome='Ludmilla' WHERE cpf='71470514400' AND nome='Teste free 1'")
+
     # Só semeia se ainda não há usuários (primeira execução).
     if conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0:
         for codigo, nome in LOJAS_KAIZEN.items():
