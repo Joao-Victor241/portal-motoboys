@@ -12,6 +12,8 @@ venv/
 # Banco local (tem CPFs de teste e hashes de senha — NÃO versionar)
 portal.db
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 
 # Fotos/uploads locais de teste

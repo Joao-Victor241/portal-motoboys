@@ -15,9 +15,17 @@ CAMINHO_BANCO = os.path.join(os.path.dirname(__file__), "portal.db")
 
 
 def conectar() -> sqlite3.Connection:
-    conn = sqlite3.connect(CAMINHO_BANCO)
+    # timeout=15: espera até 15s por um lock em vez de falhar na hora
+    # (o Streamlit abre várias conexões concorrentes ao mesmo arquivo).
+    conn = sqlite3.connect(CAMINHO_BANCO, timeout=15)
     conn.row_factory = sqlite3.Row          # acessar colunas pelo nome
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
+    # WAL: permite leitura concorrente com escrita — reduz "database is locked".
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except Exception:
+        pass
     return conn
 
 
@@ -157,8 +165,16 @@ LOJAS_KAIZEN = {
 }
 
 
+_INICIALIZADO = False
+
+
 def inicializar():
-    """Cria as tabelas, aplica migrações e semeia dados de exemplo na 1ª execução."""
+    """Cria as tabelas, aplica migrações e semeia dados de exemplo.
+    Roda só UMA vez por processo (não a cada rerun do Streamlit) — evita
+    contenção/lock no SQLite e custo desnecessário."""
+    global _INICIALIZADO
+    if _INICIALIZADO:
+        return
     conn = conectar()
     conn.executescript(ESQUEMA)
 
@@ -243,6 +259,7 @@ def inicializar():
 
     conn.commit()
     conn.close()
+    _INICIALIZADO = True
 
 
 def criar_ol(conn, nome, cnpj, limite_global):
