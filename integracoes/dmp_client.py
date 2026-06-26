@@ -313,15 +313,10 @@ class DMPClient:
         if g.status_code == 200 and g.json():
             js = g.json()
             pessoa = js[0] if isinstance(js, list) else js
-        # Cria a credencial (SEM vincular ao FACE) — o cadastro não abre a catraca.
-        # A vinculação (que a leitora obedece) só acontece ao ATIVAR o acesso.
-        if com_credencial_face:
-            try:
-                self.garantir_credencial(cpf, valido_ate)
-                pessoa["credencial_face_ok"] = True
-            except Exception as e:
-                pessoa["credencial_face_ok"] = False
-                pessoa["credencial_face_erro"] = str(e)
+        # NÃO cria credencial no cadastro. O acesso é controlado pela SITUAÇÃO
+        # (permitido/bloqueado), que manda os comandos de adicionar/retirar a
+        # biometria na leitora. A credencial é criada só para motoboy FREE, na
+        # ativação, para limitar a validade (auto-remoção no vencimento).
         return pessoa
 
     def atualizar_foto(self, cpf, nome, foto_bytes: bytes) -> dict:

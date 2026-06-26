@@ -88,8 +88,8 @@ def _desativar_free_vencidos():
                        r["cadastro_id"],
                        f"{r['nome']} — valido_ate {r['valido_ate']}")
             try:
+                # Situação bloqueado → leitora retira a biometria.
                 dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                dmp.desvincular_face(r["cpf"])
             except Exception:
                 pass  # falha no DMP não impede a suspensão local
         if vencidos:
@@ -630,20 +630,20 @@ def tela_ol(usuario):
                                "motoboy", mb["motoboy_id"], mb["nome"])
                     conn.commit()
 
-                    # Atualiza a validade da credencial facial no DMP conforme o tipo.
-                    try:
-                        nova_validade = (str(ed_valido_ate)
-                                         if ed_tipo == "free" and ed_valido_ate else None)
-                        # Atualiza a validade da credencial; se estiver vinculado
-                        # (acesso ativo), revincula com o novo prazo.
-                        dmp.garantir_credencial(mb["cpf"], valido_ate=nova_validade)
-                        cad_ativo = conn.execute(
-                            "SELECT 1 FROM cadastros WHERE motoboy_id=? AND situacao='ativo' LIMIT 1",
-                            (mb["motoboy_id"],)).fetchone()
-                        if cad_ativo:
-                            dmp.vincular_face(mb["cpf"], valido_ate=nova_validade)
-                    except Exception:
-                        pass  # não impede a edição local
+                    # Só FREE usa credencial (para limitar a validade). Ao mudar a
+                    # data, atualiza a validade; se estiver com acesso ativo, revincula
+                    # com o novo prazo para reprogramar a auto-remoção na leitora.
+                    if ed_tipo == "free" and ed_valido_ate:
+                        try:
+                            nova_validade = str(ed_valido_ate)
+                            dmp.garantir_credencial(mb["cpf"], valido_ate=nova_validade)
+                            cad_ativo = conn.execute(
+                                "SELECT 1 FROM cadastros WHERE motoboy_id=? AND situacao='ativo' LIMIT 1",
+                                (mb["motoboy_id"],)).fetchone()
+                            if cad_ativo:
+                                dmp.vincular_face(mb["cpf"], valido_ate=nova_validade)
+                        except Exception:
+                            pass  # não impede a edição local
 
                     # Limpa o estado do OCR deste motoboy
                     st.session_state.pop("ed_ocr_venc", None)
@@ -738,11 +738,9 @@ def tela_ol(usuario):
                                         (r["cadastro_id"],))
                                     db.auditar(conn, usuario["id"], "suspender_acesso",
                                                "cadastro", r["cadastro_id"], r["nome"])
-                                    # DMP: bloqueia a credencial (é o que a leitora
-                                    # obedece) e o PersonSituation.
+                                    # DMP: situação bloqueado → leitora retira a biometria.
                                     try:
                                         dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                                        dmp.desvincular_face(r["cpf"])
                                     except Exception:
                                         pass
                                     conn.commit()
@@ -840,21 +838,23 @@ def tela_ol(usuario):
                                         db.auditar(conn, usuario["id"], "ativar_acesso",
                                                    "cadastro", r["motoboy_id"],
                                                    f"{r['nome']} → {loja_sel}")
-                                        # DMP: libera o acesso e garante a credencial
-                                        # facial com a validade certa (free = até 18:30
-                                        # do valido_ate; fixo = permanente).
+                                        # DMP: a SITUAÇÃO permitido manda a leitora
+                                        # adicionar a biometria. Para FREE, cria também
+                                        # a credencial com validade (auto-remove às 18:30
+                                        # do valido_ate). Fixo = só situação.
+                                        is_free = r["tipo"] == "free"
                                         val_cred = (str(r["valido_ate"])
-                                                    if r["tipo"] == "free" and r["valido_ate"]
-                                                    else None)
+                                                    if is_free and r["valido_ate"] else None)
                                         try:
                                             dmp.liberar_pessoa(r["cpf"], r["nome"])
-                                            dmp.vincular_face(r["cpf"], valido_ate=val_cred)
+                                            if is_free:
+                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                         except Exception:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
-                                                                     valido_ate=val_cred,
                                                                      liberado=True)
-                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
+                                                if is_free:
+                                                    dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                             except Exception:
                                                 pass
                                         conn.commit()
@@ -891,10 +891,9 @@ def tela_ol(usuario):
                                     (cad_row["id"],))
                                 db.auditar(conn, usuario["id"], "suspender_acesso",
                                            "cadastro", cad_row["id"], r["nome"])
-                                # DMP: bloqueia a credencial (o que a leitora obedece) + pessoa
+                                # DMP: situação bloqueado → leitora retira a biometria.
                                 try:
                                     dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                                    dmp.desvincular_face(r["cpf"])
                                 except Exception:
                                     pass
                                 conn.commit()
