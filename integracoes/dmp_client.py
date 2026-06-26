@@ -229,29 +229,53 @@ class DMPClient:
         return {"ok": True, "credencial": numero}
 
     def vincular_face(self, cpf, person_id=None, valido_ate=None) -> dict:
-        """ATIVA o reconhecimento facial na leitora: garante a credencial e a
-        VINCULA à pessoa para uso no FACE (ForFaceUse=true). É o que a leitora
-        obedece. FREE: vínculo expira em 18:30 do valido_ate."""
+        """ATIVA o reconhecimento facial do motoboy FREE com prazo.
+
+        Atualiza a VALIDADE da credencial (PUT, sem excluir nem recriar) para
+        18:30 do valido_ate — a leitora cria o comando futuro que retira a
+        biometria no vencimento. A associação FACE é criada só uma vez
+        (idempotente): se já existir, apenas a validade é atualizada."""
         numero = int("".join(filter(str.isdigit, str(cpf))))
         fim = self._fim_do_dia(valido_ate)
         if self.simulado:
             return {"_simulado": True, "credencial": numero, "valido_ate": fim}
+
+        # 1) Atualiza/cria a credencial com a nova validade (sem excluir).
         self.garantir_credencial(cpf, valido_ate)
         if person_id is None:
             person_id = self._person_id(numero)
-        corpo_assoc = {
-            "PersonId": person_id,
-            "CredentialNumber": numero,
-            "InitialDate": _agora_br_iso(),
-            "FinalDate": fim,
-            "ForREPUse": False,
-            "ForFaceUse": True,
-        }
-        r = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
-                              json=corpo_assoc, headers=self._auth(), timeout=30)
-        if r.status_code not in (200, 201, 204, 400, 409):
-            r.raise_for_status()
-        return {"ok": True, "credencial": numero, "person_id": person_id, "valido_ate": fim}
+
+        # 2) Já existe vínculo FACE não-baixado? (associação que NÃO foi dada baixa,
+        # ou seja, CredentialReleasementDatetime nulo). FREE tem FinalDate = validade,
+        # então NÃO dá pra checar por FinalDate — usamos a baixa.
+        ja_vinculado = False
+        a = self._sessao.get(f"{self.base_url}/api/v1/PersonCredential/{person_id}",
+                             headers=self._auth(), timeout=30)
+        if a.status_code == 200 and a.text.strip():
+            for x in a.json():
+                if (x.get("CredentialReleasementDatetime") is None and x.get("ForFaceUse")
+                        and int(x.get("CredentialNumber") or 0) == numero):
+                    ja_vinculado = True
+                    break
+
+        # 3) Cria a associação só uma vez. A VALIDADE fica na CREDENCIAL (atualizada
+        # no passo 1 por PUT); a associação é permanente (FinalDate=None) e nunca é
+        # recriada/baixada — evita o erro "credencial já associada".
+        if not ja_vinculado:
+            corpo_assoc = {
+                "PersonId": person_id,
+                "CredentialNumber": numero,
+                "InitialDate": _agora_br_iso(),
+                "FinalDate": None,
+                "ForREPUse": False,
+                "ForFaceUse": True,
+            }
+            r = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
+                                  json=corpo_assoc, headers=self._auth(), timeout=30)
+            if r.status_code not in (200, 201, 204, 400, 409):
+                r.raise_for_status()
+        return {"ok": True, "credencial": numero, "person_id": person_id,
+                "valido_ate": fim, "ja_vinculado": ja_vinculado}
 
     def desvincular_face(self, cpf, person_id=None) -> dict:
         """SUSPENDE o reconhecimento facial: desvincula (WriteOff) as associações

@@ -69,20 +69,24 @@ def validar_ativacao(conn, ol_id, loja_id, motoboy_id=None) -> list:
     """
     erros = []
 
-    # Regra: motoboy só pode estar ativo em UMA loja por vez.
+    # Regra: o motoboy só pode estar ativo em UM lugar por vez — em QUALQUER OL
+    # ou loja. Se já está ativo (mesmo que por outra OL), não pode ser ativado
+    # de novo. Isso impede que duas OLs rodem o mesmo motoboy ao mesmo tempo.
     # E FREE com validade vencida não pode ser ativado.
     if motoboy_id:
         ja_ativo = conn.execute(
-            "SELECT l.nome FROM cadastros c "
+            "SELECT l.nome AS loja, o.nome AS ol FROM cadastros c "
             "JOIN lojas l ON l.id = c.loja_id "
-            "WHERE c.motoboy_id = ? AND c.ol_id = ? AND c.situacao = 'ativo' "
-            "AND c.loja_id != ?",
+            "JOIN ols o ON o.id = c.ol_id "
+            "WHERE c.motoboy_id = ? AND c.situacao = 'ativo' "
+            "AND NOT (c.ol_id = ? AND c.loja_id = ?)",
             (motoboy_id, ol_id, loja_id)
         ).fetchone()
         if ja_ativo:
             erros.append(
-                f"Este motoboy já está ativo em {ja_ativo['nome']}. "
-                "Suspenda o acesso lá antes de ativar em outra loja."
+                f"Este motoboy já está ativo em {ja_ativo['loja']} "
+                f"(OL: {ja_ativo['ol']}). Ele só pode rodar em um lugar por vez — "
+                "suspenda o acesso lá antes de ativar aqui."
             )
 
         mol = conn.execute(
