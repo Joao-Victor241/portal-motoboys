@@ -49,6 +49,8 @@ class DMPClient:
         self.situ_bloqueado = int(os.getenv("DMP_SITU_BLOQUEADO", "11"))
         self._bearer: str | None = None
         self._bearer_expira_em: float = 0.0
+        # Sessão HTTP reutilizável (keep-alive) — acelera chamadas repetidas.
+        self._sessao = requests.Session()
 
     # ---- Autenticação -----------------------------------------------------
 
@@ -58,7 +60,7 @@ class DMPClient:
             self._bearer = "BEARER-SIMULADO"
             self._bearer_expira_em = time.time() + 1700
             return self._bearer
-        resp = requests.get(
+        resp = self._sessao.get(
             f"{self.base_url}/api/v1/Logon",
             params={"username": self.username, "password": self.password, "culture": "pt-BR"},
             headers={"Authorization": f"NAK {self.nak}"},
@@ -96,7 +98,7 @@ class DMPClient:
             info["erro"] = "App está em MODO SIMULADO (DMP_SIMULADO != false)."
             return info
         try:
-            resp = requests.get(
+            resp = self._sessao.get(
                 f"{self.base_url}/api/v1/Logon",
                 params={"username": self.username, "password": self.password,
                         "culture": "pt-BR"},
@@ -110,7 +112,7 @@ class DMPClient:
                 info["expira_em"] = dados.get("expires")
                 # Conta quantas pessoas existem no DMP (sanity check do Bearer).
                 bearer = dados.get("access_token", "")
-                g = requests.get(
+                g = self._sessao.get(
                     f"{self.base_url}/api/v1/Person",
                     headers={"Authorization": f"Bearer {bearer}"},
                     params={"pageSize": 1, "pageIndex": 0}, timeout=30,
@@ -153,7 +155,7 @@ class DMPClient:
         """Lê a PersonSituation atual da pessoa no DMP (None se não achar)."""
         try:
             numero = int("".join(filter(str.isdigit, str(cpf))))
-            g = requests.get(f"{self.base_url}/api/v1/Person/{numero}",
+            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{numero}",
                              headers=self._auth(), timeout=30)
             if g.status_code == 200 and g.json():
                 js = g.json()
@@ -162,48 +164,69 @@ class DMPClient:
             pass
         return None
 
-    def criar_credencial_face(self, cpf, person_id=None, valido_ate=None) -> dict:
+    def _corpo_credencial(self, numero, valido_ate=None, ativa=True) -> dict:
+        """Monta o corpo da credencial. ativa=True → CredentialStatus=0 (válida);
+        False → 1 (bloqueada). Pública/global (chega nas leitoras), tipo PESSOA,
+        Proximidade. FREE (valido_ate) = temporária até 18:30; FIXO = permanente."""
+        fim = self._fim_do_dia(valido_ate)
+        temporaria = fim is not None
+        corpo = {
+            "CredentialType": 1,                       # PESSOA
+            "TechnologyType": 3,                        # Proximity
+            "DurationType": 0 if temporaria else 1,    # 0=Temporária, 1=Permanente
+            "CredentialStatus": 0 if ativa else 1,     # 0=Válida, 1=Bloqueada
+            "MasterType": 0,
+            "Number": numero,
+            "OrganizationalStructure": 0,              # 0 = pública (chega nas leitoras)
+            "IsCredentialPublic": True,
+            "IsEquipmentSupervisor": False,
+        }
+        if not ativa:
+            # Obrigatório quando CredentialStatus = Bloqueada.
+            corpo["BlockingReason"] = "Acesso suspenso pelo portal"
+        if temporaria:
+            corpo["ValidityBegin"] = _agora_br_iso()
+            corpo["ValidityEnd"] = fim
+        return corpo
+
+    def definir_status_credencial(self, cpf, ativa: bool, valido_ate=None) -> dict:
+        """Liga/desliga a credencial na leitora rapidamente (1 PUT).
+        É O QUE A LEITORA OBEDECE: ativa=True libera o reconhecimento facial;
+        ativa=False bloqueia. Usado no ativar/suspender (resposta rápida)."""
+        numero = int("".join(filter(str.isdigit, str(cpf))))
+        if self.simulado:
+            return {"_simulado": True, "ativa": ativa}
+        corpo = self._corpo_credencial(numero, valido_ate, ativa)
+        r = self._sessao.put(f"{self.base_url}/api/v1/Credential/{numero}",
+                             json=corpo, headers=self._auth(), timeout=30)
+        if r.status_code not in (200, 201, 204):
+            r.raise_for_status()
+        return {"ok": True, "ativa": ativa}
+
+    def criar_credencial_face(self, cpf, person_id=None, valido_ate=None,
+                              ativa: bool = False) -> dict:
         """
         Cria a credencial e a associa à pessoa para uso no FACE — passo
         obrigatório para o reconhecimento facial liberar a catraca.
 
-        Replica o que é feito manualmente no DMP (aba Credenciais → "Adicionar"
-        + "Credencial para uso no FACE"). Estrutura validada no cadastro do
-        Felipe DFControl (tipo PESSOA=1, tecnologia Proximidade=3, Number=CPF,
-        estrutura 398) e confirmada pelo exemplo enviado pela Dimep.
+        ativa=False (padrão): credencial entra BLOQUEADA (CredentialStatus=1) —
+        o cadastro sozinho não abre a catraca; só ao ATIVAR o acesso. A leitora
+        obedece o status da credencial (não o PersonSituation).
 
-        Validade:
-          - valido_ate informado (motoboy FREE) → credencial TEMPORÁRIA, válida
-            até o fim daquele dia. A facial para de funcionar quando expira.
-          - valido_ate vazio (motoboy FIXO) → credencial PERMANENTE.
-        Idempotente: se a credencial/associação já existir, não quebra.
+        Validade (FREE): credencial temporária até 18:30 do valido_ate; FIXO =
+        permanente. Estrutura: pública (Org=0), tipo PESSOA, Proximidade —
+        validada contra o RENATO (que funciona) e o exemplo da Dimep.
+        Idempotente: se já existir, atualiza (PUT).
         """
         numero = int("".join(filter(str.isdigit, str(cpf))))
         fim = self._fim_do_dia(valido_ate)
-        temporaria = fim is not None
         if self.simulado:
             return {"_simulado": True, "credencial": numero, "face": True,
-                    "valido_ate": fim}
+                    "valido_ate": fim, "ativa": ativa}
 
-        # 1) Cria a credencial (validade conforme o tipo do motoboy).
-        # IsCredentialPublic=True + OrganizationalStructure=0 são ESSENCIAIS para
-        # a credencial ser distribuída a todas as leitoras (validado contra o
-        # cadastro do RENATO, que funciona, e confirmado pelo exemplo da Dimep).
-        corpo_cred = {
-            "CredentialType": 1,                       # PESSOA
-            "TechnologyType": 3,                        # Proximity
-            "DurationType": 0 if temporaria else 1,    # 0=Temporária, 1=Permanente
-            "CredentialStatus": 0,                      # Válida
-            "MasterType": 0,                            # Não master
-            "Number": numero,
-            "OrganizationalStructure": 0,              # 0 = pública/global (chega nas leitoras)
-            "IsCredentialPublic": True,
-            "IsEquipmentSupervisor": False,
-        }
-        if temporaria:
-            corpo_cred["ValidityBegin"] = _agora_br_iso()
-            corpo_cred["ValidityEnd"] = fim
-        r1 = requests.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
+        # 1) Cria a credencial (status conforme ativa; validade conforme o tipo).
+        corpo_cred = self._corpo_credencial(numero, valido_ate, ativa)
+        r1 = self._sessao.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
                            headers=self._auth(), timeout=30)
         # 400/409 normalmente = já existe; só levanta para erros inesperados.
         ja_existe = r1.status_code in (400, 409)
@@ -211,12 +234,12 @@ class DMPClient:
             r1.raise_for_status()
         # Se já existia, atualiza a validade (caso o motoboy tenha mudado de prazo).
         if ja_existe:
-            requests.put(f"{self.base_url}/api/v1/Credential/{numero}", json=corpo_cred,
+            self._sessao.put(f"{self.base_url}/api/v1/Credential/{numero}", json=corpo_cred,
                          headers=self._auth(), timeout=30)
 
         # 2) Descobre o PersonId, se não foi passado.
         if person_id is None:
-            g = requests.get(f"{self.base_url}/api/v1/Person/{numero}",
+            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{numero}",
                              headers=self._auth(), timeout=30)
             if g.status_code == 200 and g.json():
                 js = g.json()
@@ -231,7 +254,7 @@ class DMPClient:
             "ForREPUse": False,
             "ForFaceUse": True,
         }
-        r2 = requests.post(f"{self.base_url}/api/v1/PersonCredential/Association",
+        r2 = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
                            json=corpo_assoc, headers=self._auth(), timeout=30)
         if r2.status_code not in (200, 201, 204, 400, 409):
             r2.raise_for_status()
@@ -259,13 +282,13 @@ class DMPClient:
         if self.simulado:
             return {"Id": corpo["RegistrationNumber"], "_simulado": True,
                     "credencial_face_ok": True}
-        resp = requests.post(f"{self.base_url}/api/v1/Person", json=corpo,
+        resp = self._sessao.post(f"{self.base_url}/api/v1/Person", json=corpo,
                              headers=self._auth(), timeout=30)
         resp.raise_for_status()
         # O POST ecoa o corpo (Id=0). Buscamos o registro para pegar o Id real do DMP.
         reg = corpo["RegistrationNumber"]
         pessoa = corpo
-        g = requests.get(f"{self.base_url}/api/v1/Person/{reg}",
+        g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
                          headers=self._auth(), timeout=30)
         if g.status_code == 200 and g.json():
             js = g.json()
@@ -292,7 +315,7 @@ class DMPClient:
         if situacao is None:
             situacao = self.situ_bloqueado
         corpo = self._montar_pessoa(cpf, nome, foto_b64, None, situacao)
-        resp = requests.put(f"{self.base_url}/api/v1/Person", json=corpo,
+        resp = self._sessao.put(f"{self.base_url}/api/v1/Person", json=corpo,
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()
         return {"ok": True}
@@ -302,7 +325,7 @@ class DMPClient:
         corpo = self._montar_pessoa(cpf, nome, None, None, self.situ_permitido)
         if self.simulado:
             return {"_simulado": True, "situacao": self.situ_permitido}
-        resp = requests.put(f"{self.base_url}/api/v1/Person", json=corpo,
+        resp = self._sessao.put(f"{self.base_url}/api/v1/Person", json=corpo,
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()
         return {"ok": True}
@@ -314,7 +337,7 @@ class DMPClient:
         corpo = self._montar_pessoa(cpf, nome, None, None, self.situ_bloqueado)
         if self.simulado:
             return {"_simulado": True, "situacao": self.situ_bloqueado}
-        resp = requests.put(f"{self.base_url}/api/v1/Person", json=corpo,
+        resp = self._sessao.put(f"{self.base_url}/api/v1/Person", json=corpo,
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()
         return {"ok": True}
@@ -330,7 +353,7 @@ class DMPClient:
         ids = set()
         page = 0
         while page <= 50:  # trava de segurança (máx 50 páginas)
-            r = requests.get(f"{self.base_url}/api/v1/Person", headers=self._auth(),
+            r = self._sessao.get(f"{self.base_url}/api/v1/Person", headers=self._auth(),
                              params={"pageSize": 200, "pageIndex": page}, timeout=30)
             r.raise_for_status()
             js = r.json()
@@ -353,7 +376,7 @@ class DMPClient:
         """GET /api/v1/AccessLog/Pointer/{id} — leitura incremental dos acessos."""
         if self.simulado:
             return []
-        resp = requests.get(f"{self.base_url}/api/v1/AccessLog/Pointer/{ponteiro}",
+        resp = self._sessao.get(f"{self.base_url}/api/v1/AccessLog/Pointer/{ponteiro}",
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()
         return resp.json()

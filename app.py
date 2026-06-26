@@ -89,6 +89,7 @@ def _desativar_free_vencidos():
                        f"{r['nome']} — valido_ate {r['valido_ate']}")
             try:
                 dmp.bloquear_pessoa(r["cpf"], r["nome"])
+                dmp.definir_status_credencial(r["cpf"], ativa=False)
             except Exception:
                 pass  # falha no DMP não impede a suspensão local
         if vencidos:
@@ -730,9 +731,11 @@ def tela_ol(usuario):
                                         (r["cadastro_id"],))
                                     db.auditar(conn, usuario["id"], "suspender_acesso",
                                                "cadastro", r["cadastro_id"], r["nome"])
-                                    # DMP: bloqueia na catraca (PersonSituation é global)
+                                    # DMP: bloqueia a credencial (é o que a leitora
+                                    # obedece) e o PersonSituation.
                                     try:
                                         dmp.bloquear_pessoa(r["cpf"], r["nome"])
+                                        dmp.definir_status_credencial(r["cpf"], ativa=False)
                                     except Exception:
                                         pass
                                     conn.commit()
@@ -838,12 +841,15 @@ def tela_ol(usuario):
                                                     else None)
                                         try:
                                             dmp.liberar_pessoa(r["cpf"], r["nome"])
-                                            dmp.criar_credencial_face(r["cpf"], valido_ate=val_cred)
+                                            dmp.definir_status_credencial(r["cpf"], ativa=True,
+                                                                          valido_ate=val_cred)
                                         except Exception:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
                                                                      valido_ate=val_cred,
                                                                      liberado=True)
+                                                dmp.definir_status_credencial(r["cpf"], ativa=True,
+                                                                              valido_ate=val_cred)
                                             except Exception:
                                                 pass
                                         conn.commit()
@@ -880,9 +886,10 @@ def tela_ol(usuario):
                                     (cad_row["id"],))
                                 db.auditar(conn, usuario["id"], "suspender_acesso",
                                            "cadastro", cad_row["id"], r["nome"])
-                                # DMP: bloqueia acesso
+                                # DMP: bloqueia a credencial (o que a leitora obedece) + pessoa
                                 try:
                                     dmp.bloquear_pessoa(r["cpf"], r["nome"])
+                                    dmp.definir_status_credencial(r["cpf"], ativa=False)
                                 except Exception:
                                     pass
                                 conn.commit()
