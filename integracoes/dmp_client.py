@@ -231,23 +231,23 @@ class DMPClient:
     def vincular_face(self, cpf, person_id=None, valido_ate=None) -> dict:
         """ATIVA o reconhecimento facial do motoboy FREE com prazo.
 
-        Atualiza a VALIDADE da credencial (PUT, sem excluir nem recriar) para
-        18:30 do valido_ate — a leitora cria o comando futuro que retira a
-        biometria no vencimento. A associação FACE é criada só uma vez
-        (idempotente): se já existir, apenas a validade é atualizada."""
+        A VALIDADE fica na CREDENCIAL (atualizável por PUT, sem recriar):
+          - Válida de  (ValidityBegin) = agora (momento da ativação)
+          - Válida até (ValidityEnd)   = 18:30 do valido_ate (data do cadastro)
+        A associação FACE é criada UMA vez (o DMP não deixa re-associar a mesma
+        credencial). Editar a data depois só atualiza a credencial."""
         numero = int("".join(filter(str.isdigit, str(cpf))))
         fim = self._fim_do_dia(valido_ate)
         if self.simulado:
             return {"_simulado": True, "credencial": numero, "valido_ate": fim}
 
-        # 1) Atualiza/cria a credencial com a nova validade (sem excluir).
+        # 1) Cria/atualiza a credencial com a validade (ValidityBegin=agora, ValidityEnd=fim).
         self.garantir_credencial(cpf, valido_ate)
         if person_id is None:
             person_id = self._person_id(numero)
 
-        # 2) Já existe vínculo FACE não-baixado? (associação que NÃO foi dada baixa,
-        # ou seja, CredentialReleasementDatetime nulo). FREE tem FinalDate = validade,
-        # então NÃO dá pra checar por FinalDate — usamos a baixa.
+        # 2) Já existe vínculo FACE (não-baixado)? Não dá pra re-associar a mesma
+        # credencial — então só cria se ainda não houver.
         ja_vinculado = False
         a = self._sessao.get(f"{self.base_url}/api/v1/PersonCredential/{person_id}",
                              headers=self._auth(), timeout=30)
@@ -258,15 +258,12 @@ class DMPClient:
                     ja_vinculado = True
                     break
 
-        # 3) Cria a associação só uma vez. A VALIDADE fica na CREDENCIAL (atualizada
-        # no passo 1 por PUT); a associação é permanente (FinalDate=None) e nunca é
-        # recriada/baixada — evita o erro "credencial já associada".
         if not ja_vinculado:
             corpo_assoc = {
                 "PersonId": person_id,
                 "CredentialNumber": numero,
                 "InitialDate": _agora_br_iso(),
-                "FinalDate": None,
+                "FinalDate": fim,
                 "ForREPUse": False,
                 "ForFaceUse": True,
             }
