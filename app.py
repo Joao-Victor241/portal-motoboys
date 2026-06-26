@@ -89,7 +89,7 @@ def _desativar_free_vencidos():
                        f"{r['nome']} — valido_ate {r['valido_ate']}")
             try:
                 dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                dmp.definir_status_credencial(r["cpf"], ativa=False)
+                dmp.desvincular_face(r["cpf"])
             except Exception:
                 pass  # falha no DMP não impede a suspensão local
         if vencidos:
@@ -634,7 +634,14 @@ def tela_ol(usuario):
                     try:
                         nova_validade = (str(ed_valido_ate)
                                          if ed_tipo == "free" and ed_valido_ate else None)
-                        dmp.criar_credencial_face(mb["cpf"], valido_ate=nova_validade)
+                        # Atualiza a validade da credencial; se estiver vinculado
+                        # (acesso ativo), revincula com o novo prazo.
+                        dmp.garantir_credencial(mb["cpf"], valido_ate=nova_validade)
+                        cad_ativo = conn.execute(
+                            "SELECT 1 FROM cadastros WHERE motoboy_id=? AND situacao='ativo' LIMIT 1",
+                            (mb["motoboy_id"],)).fetchone()
+                        if cad_ativo:
+                            dmp.vincular_face(mb["cpf"], valido_ate=nova_validade)
                     except Exception:
                         pass  # não impede a edição local
 
@@ -735,7 +742,7 @@ def tela_ol(usuario):
                                     # obedece) e o PersonSituation.
                                     try:
                                         dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                                        dmp.definir_status_credencial(r["cpf"], ativa=False)
+                                        dmp.desvincular_face(r["cpf"])
                                     except Exception:
                                         pass
                                     conn.commit()
@@ -841,15 +848,13 @@ def tela_ol(usuario):
                                                     else None)
                                         try:
                                             dmp.liberar_pessoa(r["cpf"], r["nome"])
-                                            dmp.definir_status_credencial(r["cpf"], ativa=True,
-                                                                          valido_ate=val_cred)
+                                            dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                         except Exception:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
                                                                      valido_ate=val_cred,
                                                                      liberado=True)
-                                                dmp.definir_status_credencial(r["cpf"], ativa=True,
-                                                                              valido_ate=val_cred)
+                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                             except Exception:
                                                 pass
                                         conn.commit()
@@ -889,7 +894,7 @@ def tela_ol(usuario):
                                 # DMP: bloqueia a credencial (o que a leitora obedece) + pessoa
                                 try:
                                     dmp.bloquear_pessoa(r["cpf"], r["nome"])
-                                    dmp.definir_status_credencial(r["cpf"], ativa=False)
+                                    dmp.desvincular_face(r["cpf"])
                                 except Exception:
                                     pass
                                 conn.commit()

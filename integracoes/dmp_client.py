@@ -203,49 +203,42 @@ class DMPClient:
             r.raise_for_status()
         return {"ok": True, "ativa": ativa}
 
-    def criar_credencial_face(self, cpf, person_id=None, valido_ate=None,
-                              ativa: bool = False) -> dict:
-        """
-        Cria a credencial e a associa à pessoa para uso no FACE — passo
-        obrigatório para o reconhecimento facial liberar a catraca.
+    def _person_id(self, numero):
+        """Busca o Id interno da pessoa no DMP a partir do número (CPF)."""
+        g = self._sessao.get(f"{self.base_url}/api/v1/Person/{numero}",
+                             headers=self._auth(), timeout=30)
+        if g.status_code == 200 and g.json():
+            js = g.json()
+            return (js[0] if isinstance(js, list) else js).get("Id")
+        return None
 
-        ativa=False (padrão): credencial entra BLOQUEADA (CredentialStatus=1) —
-        o cadastro sozinho não abre a catraca; só ao ATIVAR o acesso. A leitora
-        obedece o status da credencial (não o PersonSituation).
+    def garantir_credencial(self, cpf, valido_ate=None) -> dict:
+        """Cria/atualiza a credencial (SEM vincular ao FACE). Sempre válida.
+        FREE = validade até 18:30 do valido_ate; FIXO = permanente. Idempotente."""
+        numero = int("".join(filter(str.isdigit, str(cpf))))
+        if self.simulado:
+            return {"_simulado": True, "credencial": numero}
+        corpo = self._corpo_credencial(numero, valido_ate, ativa=True)
+        r = self._sessao.post(f"{self.base_url}/api/v1/Credential", json=corpo,
+                              headers=self._auth(), timeout=30)
+        if r.status_code in (400, 409):           # já existe → atualiza
+            self._sessao.put(f"{self.base_url}/api/v1/Credential/{numero}", json=corpo,
+                             headers=self._auth(), timeout=30)
+        elif r.status_code not in (200, 201, 204):
+            r.raise_for_status()
+        return {"ok": True, "credencial": numero}
 
-        Validade (FREE): credencial temporária até 18:30 do valido_ate; FIXO =
-        permanente. Estrutura: pública (Org=0), tipo PESSOA, Proximidade —
-        validada contra o RENATO (que funciona) e o exemplo da Dimep.
-        Idempotente: se já existir, atualiza (PUT).
-        """
+    def vincular_face(self, cpf, person_id=None, valido_ate=None) -> dict:
+        """ATIVA o reconhecimento facial na leitora: garante a credencial e a
+        VINCULA à pessoa para uso no FACE (ForFaceUse=true). É o que a leitora
+        obedece. FREE: vínculo expira em 18:30 do valido_ate."""
         numero = int("".join(filter(str.isdigit, str(cpf))))
         fim = self._fim_do_dia(valido_ate)
         if self.simulado:
-            return {"_simulado": True, "credencial": numero, "face": True,
-                    "valido_ate": fim, "ativa": ativa}
-
-        # 1) Cria a credencial (status conforme ativa; validade conforme o tipo).
-        corpo_cred = self._corpo_credencial(numero, valido_ate, ativa)
-        r1 = self._sessao.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
-                           headers=self._auth(), timeout=30)
-        # 400/409 normalmente = já existe; só levanta para erros inesperados.
-        ja_existe = r1.status_code in (400, 409)
-        if r1.status_code not in (200, 201, 204, 400, 409):
-            r1.raise_for_status()
-        # Se já existia, atualiza a validade (caso o motoboy tenha mudado de prazo).
-        if ja_existe:
-            self._sessao.put(f"{self.base_url}/api/v1/Credential/{numero}", json=corpo_cred,
-                         headers=self._auth(), timeout=30)
-
-        # 2) Descobre o PersonId, se não foi passado.
+            return {"_simulado": True, "credencial": numero, "valido_ate": fim}
+        self.garantir_credencial(cpf, valido_ate)
         if person_id is None:
-            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{numero}",
-                             headers=self._auth(), timeout=30)
-            if g.status_code == 200 and g.json():
-                js = g.json()
-                person_id = (js[0] if isinstance(js, list) else js).get("Id")
-
-        # 3) Associa a credencial à pessoa, marcando uso no FACE (com prazo).
+            person_id = self._person_id(numero)
         corpo_assoc = {
             "PersonId": person_id,
             "CredentialNumber": numero,
@@ -254,12 +247,39 @@ class DMPClient:
             "ForREPUse": False,
             "ForFaceUse": True,
         }
-        r2 = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
-                           json=corpo_assoc, headers=self._auth(), timeout=30)
-        if r2.status_code not in (200, 201, 204, 400, 409):
-            r2.raise_for_status()
-        return {"ok": True, "credencial": numero, "person_id": person_id,
-                "face": True, "valido_ate": fim}
+        r = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
+                              json=corpo_assoc, headers=self._auth(), timeout=30)
+        if r.status_code not in (200, 201, 204, 400, 409):
+            r.raise_for_status()
+        return {"ok": True, "credencial": numero, "person_id": person_id, "valido_ate": fim}
+
+    def desvincular_face(self, cpf, person_id=None) -> dict:
+        """SUSPENDE o reconhecimento facial: desvincula (WriteOff) as associações
+        FACE ativas da pessoa — tira o rosto da leitora."""
+        numero = int("".join(filter(str.isdigit, str(cpf))))
+        if self.simulado:
+            return {"_simulado": True, "desvinculadas": 1}
+        if person_id is None:
+            person_id = self._person_id(numero)
+        if not person_id:
+            return {"ok": False, "motivo": "pessoa não encontrada"}
+        a = self._sessao.get(f"{self.base_url}/api/v1/PersonCredential/{person_id}",
+                             headers=self._auth(), timeout=30)
+        n = 0
+        if a.status_code == 200 and a.text.strip():
+            for x in a.json():
+                # só as associações ativas (sem baixa) com uso no FACE
+                if x.get("FinalDate") is None and x.get("ForFaceUse"):
+                    cred = int(x.get("CredentialNumber"))
+                    self._sessao.post(
+                        f"{self.base_url}/api/v1/PersonCredential/WriteOff/{person_id}/{cred}",
+                        headers=self._auth(), timeout=30)
+                    n += 1
+        return {"ok": True, "desvinculadas": n}
+
+    # Compatibilidade: usado no cadastro/ativação. Aqui apenas vincula.
+    def criar_credencial_face(self, cpf, person_id=None, valido_ate=None, **_) -> dict:
+        return self.vincular_face(cpf, person_id=person_id, valido_ate=valido_ate)
 
     def cadastrar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None,
                          telefone: str | None = None,
@@ -293,11 +313,11 @@ class DMPClient:
         if g.status_code == 200 and g.json():
             js = g.json()
             pessoa = js[0] if isinstance(js, list) else js
-        # Cria a credencial + associação FACE (não impede o cadastro se falhar).
+        # Cria a credencial (SEM vincular ao FACE) — o cadastro não abre a catraca.
+        # A vinculação (que a leitora obedece) só acontece ao ATIVAR o acesso.
         if com_credencial_face:
             try:
-                self.criar_credencial_face(cpf, person_id=pessoa.get("Id"),
-                                           valido_ate=valido_ate)
+                self.garantir_credencial(cpf, valido_ate)
                 pessoa["credencial_face_ok"] = True
             except Exception as e:
                 pessoa["credencial_face_ok"] = False
