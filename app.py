@@ -130,10 +130,13 @@ def _sincronizar_exclusoes_dmp():
         return
     conn = db.conectar()
     try:
+        # "há mais de 2 min" — sintaxe difere entre PostgreSQL e SQLite.
+        corte = ("to_char(now() - interval '2 minutes', 'YYYY-MM-DD HH24:MI:SS')"
+                 if db.usando_pg() else "datetime('now', '-2 minutes')")
         candidatos = conn.execute(
             "SELECT id, cpf, nome FROM motoboys "
             "WHERE dmp_person_id IS NOT NULL "
-            "AND criado_em < datetime('now', '-2 minutes')"
+            f"AND criado_em < {corte}"
         ).fetchall()
         removidos = []
         for m in candidatos:
@@ -1301,9 +1304,12 @@ def tela_admin(usuario):
 
             # --- Motoboys bloqueados permanentemente ---
             st.markdown("**⛔ Bloqueados permanentemente**")
+            # juntar nomes de OLs em uma string: função difere entre PG e SQLite
+            agg_ols = ("string_agg(o.nome, ' | ')" if db.usando_pg()
+                       else "GROUP_CONCAT(o.nome, ' | ')")
             bloq_perm = conn.execute(
                 "SELECT m.nome, m.cpf, m.motivo_bloqueio, "
-                "GROUP_CONCAT(o.nome, ' | ') AS ols "
+                f"{agg_ols} AS ols "
                 "FROM motoboys m "
                 "LEFT JOIN motoboys_ol mol ON mol.motoboy_id=m.id "
                 "LEFT JOIN ols o ON o.id=mol.ol_id "

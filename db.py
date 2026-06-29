@@ -1,10 +1,18 @@
 """
 Camada de banco de dados do portal.
 
-Nesta Fase 1 usamos SQLite local (arquivo `portal.db`) para o portal rodar na
-mão sem depender de servidor. Em produção o alvo é o PostgreSQL de `db/schema.sql`.
-Por isso o código de acesso fica concentrado aqui — trocar para Postgres depois
-mexe só neste arquivo.
+Suporta DOIS bancos, escolhidos em tempo de execução:
+  - PostgreSQL: quando a variável de ambiente DATABASE_URL está definida
+    (produção — dados persistentes; é o caso do banco da empresa/TI).
+  - SQLite local (arquivo `portal.db`): fallback de desenvolvimento.
+
+O resto do código (app.py, regras.py) usa `conn.execute("... ?", (...))` como
+sempre — aqui há um adaptador que traduz para o PostgreSQL quando necessário,
+então não é preciso mexer nas dezenas de queries espalhadas pelo app.
+
+Variáveis de ambiente (Secrets do Streamlit):
+  DATABASE_URL  ex.: postgresql://usuario:senha@host:5432/banco?sslmode=require
+  DB_SCHEMA     schema onde ficam as tabelas (padrão: motoboys_portal)
 """
 
 import sqlite3
@@ -14,7 +22,121 @@ import bcrypt
 CAMINHO_BANCO = os.path.join(os.path.dirname(__file__), "portal.db")
 
 
-def conectar() -> sqlite3.Connection:
+def usando_pg() -> bool:
+    """True se houver DATABASE_URL (modo PostgreSQL). Lido a cada chamada porque
+    os Secrets do Streamlit só entram no os.environ depois do import deste módulo."""
+    return bool(os.getenv("DATABASE_URL", "").strip())
+
+
+def _schema_pg() -> str:
+    return (os.getenv("DB_SCHEMA", "").strip() or "motoboys_portal")
+
+
+# ---------------------------------------------------------------------------
+# Adaptador PostgreSQL — faz o psycopg "parecer" com o sqlite3 para o app:
+#   - traduz placeholders ? -> %s
+#   - linhas acessíveis por nome (row['col']) E por índice (row[0])
+#   - .execute(...).fetchone()/.fetchall(), .commit(), .rollback(), .close()
+# ---------------------------------------------------------------------------
+
+def _traduzir_sql(sql: str, tem_params: bool) -> str:
+    # No PostgreSQL/psycopg o placeholder é %s; aqui o código usa ?.
+    # Quando há params, % literais precisam virar %% (não temos % nas queries,
+    # mas escapamos por segurança).
+    if tem_params:
+        sql = sql.replace("%", "%%")
+    return sql.replace("?", "%s")
+
+
+class _LinhaPG:
+    """Imita sqlite3.Row: aceita row['coluna'] e row[0]."""
+    __slots__ = ("_vals", "_map")
+
+    def __init__(self, cols, vals):
+        self._vals = vals
+        self._map = {c: v for c, v in zip(cols, vals)}
+
+    def __getitem__(self, chave):
+        if isinstance(chave, int):
+            return self._vals[chave]
+        return self._map[chave]
+
+    def get(self, chave, padrao=None):
+        return self._map.get(chave, padrao)
+
+    def keys(self):
+        return list(self._map.keys())
+
+    def __iter__(self):
+        return iter(self._vals)
+
+
+class _CursorPG:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def _cols(self):
+        return [d[0] for d in self._cur.description] if self._cur.description else []
+
+    def fetchone(self):
+        r = self._cur.fetchone()
+        return _LinhaPG(self._cols(), r) if r is not None else None
+
+    def fetchall(self):
+        cols = self._cols()
+        return [_LinhaPG(cols, r) for r in self._cur.fetchall()]
+
+    def __iter__(self):
+        cols = self._cols()
+        for r in self._cur:
+            yield _LinhaPG(cols, r)
+
+
+class _ConexaoPG:
+    def __init__(self, raw):
+        self._raw = raw
+
+    def execute(self, sql, params=()):
+        cur = self._raw.cursor()
+        cur.execute(_traduzir_sql(sql, bool(params)), params if params else None)
+        return _CursorPG(cur)
+
+    def executescript(self, script):
+        cur = self._raw.cursor()
+        for stmt in script.split(";"):
+            s = stmt.strip()
+            if s:
+                cur.execute(s)
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+
+def conectar():
+    if usando_pg():
+        import psycopg
+        raw = psycopg.connect(os.getenv("DATABASE_URL").strip(), autocommit=True)
+        schema = _schema_pg()
+        cur = raw.cursor()
+        try:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'SET search_path TO "{schema}"')
+        except Exception:
+            pass
+        cur.close()
+        raw.autocommit = False   # o app controla commit/rollback
+        return _ConexaoPG(raw)
+
+    # --- SQLite (desenvolvimento) ---
     # timeout=15: espera até 15s por um lock em vez de falhar na hora
     # (o Streamlit abre várias conexões concorrentes ao mesmo arquivo).
     conn = sqlite3.connect(CAMINHO_BANCO, timeout=15)
@@ -136,6 +258,110 @@ INSERT OR IGNORE INTO acesso_estado (id, ultimo_pointer) VALUES (1, 0);
 """
 
 
+# --- Mesmo esquema, em dialeto PostgreSQL -----------------------------------
+# Diferenças vs SQLite: SERIAL no lugar de INTEGER AUTOINCREMENT; criado_em como
+# TEXT no formato 'AAAA-MM-DD HH:MM:SS' (para o app continuar tratando como
+# string, igual ao SQLite); ON CONFLICT DO NOTHING no lugar de INSERT OR IGNORE.
+_TS = "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')"
+ESQUEMA_PG = f"""
+CREATE TABLE IF NOT EXISTS lojas (
+    id      SERIAL PRIMARY KEY,
+    codigo  TEXT UNIQUE NOT NULL,
+    nome    TEXT NOT NULL,
+    ativo   INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS ols (
+    id              SERIAL PRIMARY KEY,
+    nome            TEXT NOT NULL,
+    cnpj            TEXT UNIQUE,
+    ativo           INTEGER NOT NULL DEFAULT 1,
+    limite_global   INTEGER
+);
+CREATE TABLE IF NOT EXISTS ol_loja_limite (
+    ol_id   INTEGER NOT NULL REFERENCES ols(id),
+    loja_id INTEGER NOT NULL REFERENCES lojas(id),
+    limite  INTEGER NOT NULL,
+    PRIMARY KEY (ol_id, loja_id)
+);
+CREATE TABLE IF NOT EXISTS usuarios (
+    id          SERIAL PRIMARY KEY,
+    login       TEXT UNIQUE NOT NULL,
+    senha_hash  TEXT NOT NULL,
+    perfil      TEXT NOT NULL CHECK (perfil IN ('admin','ol','operador')),
+    ol_id       INTEGER REFERENCES ols(id),
+    ativo       INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS motoboys (
+    id                      SERIAL PRIMARY KEY,
+    cpf                     TEXT UNIQUE NOT NULL,
+    nome                    TEXT NOT NULL,
+    nascimento              TEXT,
+    cnh                     TEXT,
+    cnh_venc                TEXT,
+    telefone                TEXT,
+    email                   TEXT,
+    foto_path               TEXT,
+    bloqueado_permanente    INTEGER NOT NULL DEFAULT 0,
+    motivo_bloqueio         TEXT,
+    dmp_person_id           BIGINT,
+    criado_em               TEXT NOT NULL DEFAULT {_TS}
+);
+CREATE TABLE IF NOT EXISTS motoboys_ol (
+    id          SERIAL PRIMARY KEY,
+    motoboy_id  INTEGER NOT NULL REFERENCES motoboys(id),
+    ol_id       INTEGER NOT NULL REFERENCES ols(id),
+    placa       TEXT,
+    tipo        TEXT CHECK (tipo IN ('fixo','free')),
+    valido_ate  TEXT,
+    criado_por  INTEGER REFERENCES usuarios(id),
+    criado_em   TEXT NOT NULL DEFAULT {_TS},
+    UNIQUE (motoboy_id, ol_id)
+);
+CREATE TABLE IF NOT EXISTS cadastros (
+    id              SERIAL PRIMARY KEY,
+    motoboy_id      INTEGER NOT NULL REFERENCES motoboys(id),
+    ol_id           INTEGER NOT NULL REFERENCES ols(id),
+    loja_id         INTEGER NOT NULL REFERENCES lojas(id),
+    situacao        TEXT NOT NULL DEFAULT 'ativo',
+    enviado_siac    INTEGER NOT NULL DEFAULT 0,
+    enviado_dmp     INTEGER NOT NULL DEFAULT 0,
+    criado_por      INTEGER REFERENCES usuarios(id),
+    criado_em       TEXT NOT NULL DEFAULT {_TS},
+    UNIQUE (motoboy_id, ol_id, loja_id)
+);
+CREATE TABLE IF NOT EXISTS selfie_links (
+    token       TEXT PRIMARY KEY,
+    motoboy_id  INTEGER NOT NULL REFERENCES motoboys(id),
+    expira_em   TEXT NOT NULL,
+    usado_em    TEXT
+);
+CREATE TABLE IF NOT EXISTS auditoria (
+    id          BIGSERIAL PRIMARY KEY,
+    usuario_id  INTEGER REFERENCES usuarios(id),
+    acao        TEXT NOT NULL,
+    entidade    TEXT,
+    entidade_id INTEGER,
+    detalhe     TEXT,
+    criado_em   TEXT NOT NULL DEFAULT {_TS}
+);
+CREATE TABLE IF NOT EXISTS acesso_eventos (
+    id          BIGSERIAL PRIMARY KEY,
+    motoboy_id  INTEGER REFERENCES motoboys(id),
+    loja_id     INTEGER REFERENCES lojas(id),
+    cpf         TEXT,
+    nome        TEXT,
+    tipo        TEXT,
+    ocorrido_em TEXT NOT NULL,
+    dmp_pointer BIGINT
+);
+CREATE TABLE IF NOT EXISTS acesso_estado (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    ultimo_pointer BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO acesso_estado (id, ultimo_pointer) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+"""
+
+
 def _hash(senha: str) -> str:
     return bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
 
@@ -172,9 +398,49 @@ def inicializar():
     """Cria as tabelas, aplica migrações e semeia dados de exemplo.
     Roda só UMA vez por processo (não a cada rerun do Streamlit) — evita
     contenção/lock no SQLite e custo desnecessário."""
-    global _INICIALIZADO
+    global _INICIALIZADO, _SENHAS_SINCRONIZADAS
     if _INICIALIZADO:
         return
+
+    # ---- Caminho PostgreSQL (produção) ----
+    if usando_pg():
+        conn = conectar()
+        conn.executescript(ESQUEMA_PG)
+        # Nomes oficiais das lojas (idempotente).
+        for codigo, nome in LOJAS_KAIZEN.items():
+            conn.execute("UPDATE lojas SET nome=? WHERE codigo=?", (nome, codigo))
+        # Correção pontual de nome (one-off).
+        conn.execute("UPDATE motoboys SET nome='Ludmilla' "
+                     "WHERE cpf='71470514400' AND nome='Teste free 1'")
+        # Semeia na primeira execução.
+        if conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0:
+            for codigo, nome in LOJAS_KAIZEN.items():
+                conn.execute("INSERT INTO lojas (codigo, nome) VALUES (?, ?)", (codigo, nome))
+            ol_id = conn.execute(
+                "INSERT INTO ols (nome, cnpj, limite_global) VALUES (?, ?, ?) RETURNING id",
+                ("OL Exemplo Transportes", "00000000000191", 50)).fetchone()[0]
+            for loja in conn.execute("SELECT id FROM lojas").fetchall():
+                conn.execute("INSERT INTO ol_loja_limite (ol_id, loja_id, limite) VALUES (?,?,?)",
+                             (ol_id, loja["id"], 10))
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("admin", _hash(_senha_padrao("admin")), "admin"))
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil, ol_id) VALUES (?,?,?,?)",
+                         ("ol_exemplo", _hash(_senha_padrao("ol_exemplo")), "ol", ol_id))
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("operador", _hash(_senha_padrao("operador")), "operador"))
+        # Sincroniza senhas com os Secrets (1x por processo).
+        if not _SENHAS_SINCRONIZADAS:
+            for login, (chave, _fb) in _MAPA_SENHA_ENV.items():
+                if os.getenv(chave):
+                    conn.execute("UPDATE usuarios SET senha_hash=? WHERE login=?",
+                                 (_hash(_senha_padrao(login)), login))
+            _SENHAS_SINCRONIZADAS = True
+        conn.commit()
+        conn.close()
+        _INICIALIZADO = True
+        return
+
+    # ---- Caminho SQLite (desenvolvimento) ----
     conn = conectar()
     conn.executescript(ESQUEMA)
 
@@ -254,7 +520,6 @@ def inicializar():
     # Sincroniza as senhas dos usuários padrão com os Secrets (1x por processo).
     # Só atualiza quando a variável de ambiente estiver definida — assim, definir
     # ADMIN_PASSWORD/etc. nos Secrets passa a valer mesmo se o banco já existia.
-    global _SENHAS_SINCRONIZADAS
     if not _SENHAS_SINCRONIZADAS:
         for login, (chave, _fb) in _MAPA_SENHA_ENV.items():
             if os.getenv(chave):
@@ -269,9 +534,14 @@ def inicializar():
 
 def criar_ol(conn, nome, cnpj, limite_global):
     """Cria uma OL e já abre os limites (0) dela em cada loja. Devolve o id."""
-    cur = conn.execute("INSERT INTO ols (nome, cnpj, limite_global) VALUES (?,?,?)",
-                       (nome, cnpj or None, limite_global))
-    ol_id = cur.lastrowid
+    if usando_pg():
+        ol_id = conn.execute(
+            "INSERT INTO ols (nome, cnpj, limite_global) VALUES (?,?,?) RETURNING id",
+            (nome, cnpj or None, limite_global)).fetchone()[0]
+    else:
+        cur = conn.execute("INSERT INTO ols (nome, cnpj, limite_global) VALUES (?,?,?)",
+                           (nome, cnpj or None, limite_global))
+        ol_id = cur.lastrowid
     for loja in conn.execute("SELECT id FROM lojas").fetchall():
         conn.execute("INSERT INTO ol_loja_limite (ol_id, loja_id, limite) VALUES (?,?,?)",
                      (ol_id, loja["id"], 0))
