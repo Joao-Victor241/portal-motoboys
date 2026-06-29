@@ -255,6 +255,29 @@ CREATE TABLE IF NOT EXISTS acesso_estado (
     ultimo_pointer INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO acesso_estado (id, ultimo_pointer) VALUES (1, 0);
+-- Prestação de contas: documentos (recibos, guias) enviados pela OL.
+-- O arquivo é guardado no próprio banco (BLOB) para persistir e ser lido depois
+-- pela extensão de leitura automática.
+CREATE TABLE IF NOT EXISTS prestacao_documentos (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ol_id        INTEGER NOT NULL REFERENCES ols(id),
+    tipo         TEXT NOT NULL,
+    competencia  TEXT,                                  -- 'AAAA-MM'
+    escopo       TEXT NOT NULL DEFAULT 'individual',    -- individual | geral
+    nome_arquivo TEXT,
+    mime         TEXT,
+    arquivo      BLOB,
+    status       TEXT NOT NULL DEFAULT 'pendente',      -- pendente | validado | rejeitado
+    criado_por   INTEGER REFERENCES usuarios(id),
+    criado_em    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Valor por motoboy de cada documento (individual = 1 linha; geral = N linhas).
+CREATE TABLE IF NOT EXISTS prestacao_valores (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),
+    motoboy_id   INTEGER REFERENCES motoboys(id),
+    valor        REAL
+);
 """
 
 
@@ -359,6 +382,25 @@ CREATE TABLE IF NOT EXISTS acesso_estado (
     ultimo_pointer BIGINT NOT NULL DEFAULT 0
 );
 INSERT INTO acesso_estado (id, ultimo_pointer) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS prestacao_documentos (
+    id           SERIAL PRIMARY KEY,
+    ol_id        INTEGER NOT NULL REFERENCES ols(id),
+    tipo         TEXT NOT NULL,
+    competencia  TEXT,
+    escopo       TEXT NOT NULL DEFAULT 'individual',
+    nome_arquivo TEXT,
+    mime         TEXT,
+    arquivo      BYTEA,
+    status       TEXT NOT NULL DEFAULT 'pendente',
+    criado_por   INTEGER REFERENCES usuarios(id),
+    criado_em    TEXT NOT NULL DEFAULT {_TS}
+);
+CREATE TABLE IF NOT EXISTS prestacao_valores (
+    id           SERIAL PRIMARY KEY,
+    documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),
+    motoboy_id   INTEGER REFERENCES motoboys(id),
+    valor        NUMERIC(12,2)
+);
 """
 
 
@@ -559,3 +601,27 @@ def auditar(conn, usuario_id, acao, entidade=None, entidade_id=None, detalhe=Non
         "INSERT INTO auditoria (usuario_id, acao, entidade, entidade_id, detalhe) "
         "VALUES (?,?,?,?,?)",
         (usuario_id, acao, entidade, entidade_id, detalhe))
+
+
+def _inserir_id(conn, sql, params):
+    """Executa um INSERT e devolve o id da linha criada (funciona em PG e SQLite)."""
+    if usando_pg():
+        return conn.execute(sql + " RETURNING id", params).fetchone()[0]
+    return conn.execute(sql, params).lastrowid
+
+
+def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, nome_arquivo, mime,
+                     arquivo_bytes, valores, criado_por):
+    """Salva um documento de prestação de contas + os valores por motoboy.
+    valores: lista de tuplas (motoboy_id, valor). Devolve o id do documento."""
+    doc_id = _inserir_id(
+        conn,
+        "INSERT INTO prestacao_documentos "
+        "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, arquivo, criado_por) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (ol_id, tipo, competencia, escopo, nome_arquivo, mime, arquivo_bytes, criado_por))
+    for motoboy_id, valor in valores:
+        conn.execute(
+            "INSERT INTO prestacao_valores (documento_id, motoboy_id, valor) VALUES (?,?,?)",
+            (doc_id, motoboy_id, valor))
+    return doc_id

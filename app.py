@@ -228,7 +228,8 @@ def tela_ol(usuario):
     lojas = conn.execute("SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
     mapa_lojas = {l["nome"]: l["id"] for l in lojas}
 
-    aba_cadastro, aba_motoboys = st.tabs(["➕ Novo cadastro", "👥 Meus motoboys"])
+    aba_cadastro, aba_motoboys, aba_prestacao = st.tabs(
+        ["➕ Novo cadastro", "👥 Meus motoboys", "📑 Prestação de contas"])
 
     # =========================================================================
     # ABA 1 — Novo cadastro (sem campo de loja — cadastro é geral)
@@ -926,6 +927,152 @@ def tela_ol(usuario):
                             f"https://wa.me/55{tel_limpo}?text={urllib.parse.quote(msg_r)}",
                             type="primary", use_container_width=True)
 
+    # =========================================================================
+    # ABA 3 — Prestação de contas (upload de documentos de pagamento)
+    # =========================================================================
+    with aba_prestacao:
+        ol_id = usuario["ol_id"]
+        st.markdown("### 📑 Prestação de contas")
+        st.caption(
+            "Envie os comprovantes de pagamento aos motoboys (recibos assinados, "
+            "guias, etc.). Os documentos ficam guardados e poderão ser lidos e "
+            "validados automaticamente."
+        )
+
+        TIPOS_DOC = [
+            "Contracheque", "Periculosidade", "Vale alimentação", "Aluguel da moto",
+            "Combustível", "Guia FGTS / RE", "Férias e recibos",
+            "Atestado / INSS (afastamento)", "Rescisão", "13º salário", "Pendências",
+        ]
+        MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                 "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+        motoboys_ol = conn.execute(
+            "SELECT m.id, m.nome FROM motoboys_ol mol "
+            "JOIN motoboys m ON m.id = mol.motoboy_id "
+            "WHERE mol.ol_id = ? ORDER BY m.nome", (ol_id,)
+        ).fetchall()
+
+        if not motoboys_ol:
+            st.info("Cadastre seus motoboys primeiro (aba **Novo cadastro**) "
+                    "para poder enviar a prestação de contas.")
+        else:
+            with st.container(border=True):
+                st.markdown("**Enviar novo documento**")
+                tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC, key="pc_tipo")
+
+                cm, ca = st.columns(2)
+                with cm:
+                    mes_sel = st.selectbox("Mês de referência", MESES,
+                                           index=HOJE.month - 1, key="pc_mes")
+                with ca:
+                    anos = list(range(HOJE.year - 1, HOJE.year + 2))
+                    ano_sel = st.selectbox("Ano", anos, index=anos.index(HOJE.year),
+                                           key="pc_ano")
+
+                escopo = st.radio(
+                    "Este documento é de:",
+                    ["Um motoboy", "Geral (todos os motoboys)"],
+                    horizontal=True, key="pc_escopo",
+                )
+
+                valores = []        # (motoboy_id, valor)
+                escopo_db = "individual"
+                if escopo == "Um motoboy":
+                    mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
+                    mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
+                    valor = st.number_input("Valor (R$) — deixe 0 se o documento não tiver valor",
+                                            min_value=0.0, step=10.0, format="%.2f", key="pc_valor")
+                    valores_pendentes = [(mapa_mb[mb_nome], valor)]
+                else:
+                    escopo_db = "geral"
+                    st.caption("Informe o valor de cada motoboy (deixe 0 nos que não se aplicam).")
+                    ids_ordem = [m["id"] for m in motoboys_ol]
+                    linhas = [{"Motoboy": m["nome"], "Valor (R$)": 0.0} for m in motoboys_ol]
+                    editado = st.data_editor(
+                        linhas, hide_index=True, use_container_width=True, key="pc_editor",
+                        column_config={
+                            "Motoboy": st.column_config.TextColumn(disabled=True),
+                            "Valor (R$)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
+                        },
+                    )
+                    rows = editado if isinstance(editado, list) else editado.to_dict("records")
+                    valores_pendentes = [(ids_ordem[i], r.get("Valor (R$)") or 0.0)
+                                         for i, r in enumerate(rows)]
+
+                arquivo = st.file_uploader(
+                    "Arquivo (PDF ou imagem do recibo assinado)",
+                    type=["pdf", "jpg", "jpeg", "png"], key="pc_file")
+
+                if st.button("📤 Enviar documento", type="primary", use_container_width=True):
+                    if not arquivo:
+                        st.error("Anexe o arquivo do documento.")
+                    else:
+                        # mantém só os valores informados (> 0); 0 = sem valor
+                        valores = [(mid, round(float(v), 2)) for mid, v in valores_pendentes if v and v > 0]
+                        competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
+                        try:
+                            doc_id = db.salvar_prestacao(
+                                conn, ol_id, tipo_doc, competencia, escopo_db,
+                                arquivo.name, arquivo.type or "application/octet-stream",
+                                arquivo.getvalue(), valores, usuario["id"])
+                            db.auditar(conn, usuario["id"], "prestacao_contas",
+                                       "documento", doc_id, f"{tipo_doc} — {competencia}")
+                            conn.commit()
+                            st.success(f"✅ Documento enviado! ({tipo_doc} — {mes_sel}/{ano_sel})")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Erro ao salvar: {ex}")
+
+            # ---- Documentos já enviados ----
+            st.divider()
+            st.markdown("#### Documentos enviados")
+            docs = conn.execute(
+                "SELECT pd.id, pd.tipo, pd.competencia, pd.escopo, pd.status, pd.criado_em, "
+                "pd.nome_arquivo, "
+                "(SELECT COALESCE(SUM(pv.valor),0) FROM prestacao_valores pv "
+                " WHERE pv.documento_id=pd.id) AS total "
+                "FROM prestacao_documentos pd WHERE pd.ol_id=? ORDER BY pd.id DESC LIMIT 100",
+                (ol_id,)
+            ).fetchall()
+
+            if not docs:
+                st.caption("Nenhum documento enviado ainda.")
+            else:
+                st.dataframe(
+                    [{"#": d["id"], "Tipo": d["tipo"],
+                      "Competência": d["competencia"] or "—",
+                      "Escopo": "Geral" if d["escopo"] == "geral" else "Individual",
+                      "Valor total": f"R$ {d['total']:.2f}" if d["total"] else "—",
+                      "Status": "✅ Validado" if d["status"] == "validado" else "🕒 Pendente",
+                      "Enviado em": (d["criado_em"] or "")[:16].replace("T", " "),
+                      "Arquivo": d["nome_arquivo"] or "—"}
+                     for d in docs],
+                    use_container_width=True, hide_index=True)
+
+                # Baixar / remover um documento (carrega o arquivo só do escolhido)
+                mapa_doc = {f"#{d['id']} · {d['tipo']} · {d['competencia'] or 's/comp.'}": d["id"]
+                            for d in docs}
+                sel = st.selectbox("Baixar ou remover um documento", list(mapa_doc.keys()),
+                                   key="pc_sel_doc")
+                doc_id_sel = mapa_doc[sel]
+                cdl, crm = st.columns(2)
+                arq = conn.execute(
+                    "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
+                    (doc_id_sel,)).fetchone()
+                if arq and arq["arquivo"] is not None:
+                    cdl.download_button(
+                        "📥 Baixar arquivo", data=bytes(arq["arquivo"]),
+                        file_name=arq["nome_arquivo"] or f"documento_{doc_id_sel}",
+                        mime=arq["mime"] or "application/octet-stream",
+                        use_container_width=True)
+                if crm.button("🗑️ Remover", use_container_width=True, key="pc_remover"):
+                    conn.execute("DELETE FROM prestacao_valores WHERE documento_id=?", (doc_id_sel,))
+                    conn.execute("DELETE FROM prestacao_documentos WHERE id=?", (doc_id_sel,))
+                    db.auditar(conn, usuario["id"], "prestacao_removida", "documento", doc_id_sel)
+                    conn.commit()
+                    st.rerun()
+
     conn.close()
 
 
@@ -1013,9 +1160,9 @@ def tela_admin(usuario):
                 else:
                     st.info("Nada para remover — portal e DMP já estão sincronizados.")
 
-    aba_ols, aba_lim, aba_bloq, aba_base, aba_rel = st.tabs(
+    aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
-         "Base completa", "📊 Relatórios"])
+         "Base completa", "📊 Relatórios", "📑 Prestações"])
 
     # --- Cadastro de OLs ---
     with aba_ols:
@@ -1464,6 +1611,93 @@ def tela_admin(usuario):
                 st.caption(f"{len(auditoria)} registro(s) exibido(s).")
             else:
                 st.info("Nenhum registro de auditoria para os filtros selecionados.")
+
+    # =========================================================================
+    # ABA Prestações — visão do admin (todas as OLs)
+    # =========================================================================
+    with aba_prest:
+        st.markdown("#### 📑 Prestações de contas — todas as OLs")
+        st.caption("Documentos enviados pelas OLs. Baixe para conferir; o status "
+                   "indica se já foi validado.")
+
+        ols_lst = conn.execute(
+            "SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall()
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            filtro_ol = st.selectbox("OL", ["Todas"] + [o["nome"] for o in ols_lst],
+                                     key="adm_pc_ol")
+        with fc2:
+            filtro_status = st.selectbox("Status", ["Todos", "Pendente", "Validado", "Rejeitado"],
+                                         key="adm_pc_status")
+
+        where, params = [], []
+        if filtro_ol != "Todas":
+            where.append("pd.ol_id=?")
+            params.append(next(o["id"] for o in ols_lst if o["nome"] == filtro_ol))
+        if filtro_status != "Todos":
+            where.append("pd.status=?")
+            params.append(filtro_status.lower())
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        docs = conn.execute(
+            "SELECT pd.id, o.nome AS ol, pd.tipo, pd.competencia, pd.escopo, pd.status, "
+            "pd.criado_em, pd.nome_arquivo, "
+            "(SELECT COALESCE(SUM(pv.valor),0) FROM prestacao_valores pv "
+            " WHERE pv.documento_id=pd.id) AS total "
+            "FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
+            f"{where_sql} ORDER BY pd.id DESC LIMIT 300", params
+        ).fetchall()
+
+        if not docs:
+            st.info("Nenhuma prestação de contas enviada ainda.")
+        else:
+            st.dataframe(
+                [{"#": d["id"], "OL": d["ol"], "Tipo": d["tipo"],
+                  "Competência": d["competencia"] or "—",
+                  "Escopo": "Geral" if d["escopo"] == "geral" else "Individual",
+                  "Valor total": f"R$ {d['total']:.2f}" if d["total"] else "—",
+                  "Status": "✅ Validado" if d["status"] == "validado"
+                            else ("❌ Rejeitado" if d["status"] == "rejeitado" else "🕒 Pendente"),
+                  "Enviado em": (d["criado_em"] or "")[:16].replace("T", " "),
+                  "Arquivo": d["nome_arquivo"] or "—"}
+                 for d in docs],
+                use_container_width=True, hide_index=True)
+            st.caption(f"{len(docs)} documento(s).")
+
+            mapa = {f"#{d['id']} · {d['ol']} · {d['tipo']} · {d['competencia'] or 's/comp.'}": d["id"]
+                    for d in docs}
+            sel = st.selectbox("Abrir um documento", list(mapa.keys()), key="adm_pc_sel")
+            did = mapa[sel]
+
+            # Valores por motoboy do documento
+            vals = conn.execute(
+                "SELECT m.nome, pv.valor FROM prestacao_valores pv "
+                "LEFT JOIN motoboys m ON m.id=pv.motoboy_id "
+                "WHERE pv.documento_id=? ORDER BY m.nome", (did,)).fetchall()
+            if vals:
+                st.markdown("**Valores por motoboy:**")
+                st.dataframe(
+                    [{"Motoboy": v["nome"] or "—",
+                      "Valor": f"R$ {v['valor']:.2f}" if v["valor"] else "—"} for v in vals],
+                    use_container_width=True, hide_index=True)
+
+            arq = conn.execute(
+                "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
+                (did,)).fetchone()
+            b1, b2, b3 = st.columns(3)
+            if arq and arq["arquivo"] is not None:
+                b1.download_button(
+                    "📥 Baixar", data=bytes(arq["arquivo"]),
+                    file_name=arq["nome_arquivo"] or f"documento_{did}",
+                    mime=arq["mime"] or "application/octet-stream", use_container_width=True)
+            if b2.button("✅ Marcar validado", use_container_width=True, key="adm_pc_val"):
+                conn.execute("UPDATE prestacao_documentos SET status='validado' WHERE id=?", (did,))
+                conn.commit()
+                st.rerun()
+            if b3.button("🕒 Marcar pendente", use_container_width=True, key="adm_pc_pend"):
+                conn.execute("UPDATE prestacao_documentos SET status='pendente' WHERE id=?", (did,))
+                conn.commit()
+                st.rerun()
 
     conn.close()
 
