@@ -271,12 +271,19 @@ CREATE TABLE IF NOT EXISTS prestacao_documentos (
     criado_por   INTEGER REFERENCES usuarios(id),
     criado_em    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
--- Valor por motoboy de cada documento (individual = 1 linha; geral = N linhas).
+-- Valor de cada documento. Por motoboy (individual/geral) e/ou por tipo
+-- (quando o arquivo é "Outros" e contém vários documentos juntos).
 CREATE TABLE IF NOT EXISTS prestacao_valores (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),
     motoboy_id   INTEGER REFERENCES motoboys(id),
+    tipo         TEXT,
     valor        REAL
+);
+-- Configurações gerais do portal (chave/valor). Ex.: prazo de prestação.
+CREATE TABLE IF NOT EXISTS configuracoes (
+    chave TEXT PRIMARY KEY,
+    valor TEXT
 );
 """
 
@@ -399,7 +406,12 @@ CREATE TABLE IF NOT EXISTS prestacao_valores (
     id           SERIAL PRIMARY KEY,
     documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),
     motoboy_id   INTEGER REFERENCES motoboys(id),
+    tipo         TEXT,
     valor        NUMERIC(12,2)
+);
+CREATE TABLE IF NOT EXISTS configuracoes (
+    chave TEXT PRIMARY KEY,
+    valor TEXT
 );
 """
 
@@ -610,18 +622,66 @@ def _inserir_id(conn, sql, params):
     return conn.execute(sql, params).lastrowid
 
 
+def garantir_tabelas_prestacao(conn):
+    """Cria (se faltarem) as tabelas de prestação de contas e configurações.
+    Defensivo: garante que existam mesmo se o banco veio de uma versão antiga."""
+    pg = usando_pg()
+    serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    blob = "BYTEA" if pg else "BLOB"
+    ts = "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')" if pg else "CURRENT_TIMESTAMP"
+    valor_tipo = "NUMERIC(12,2)" if pg else "REAL"
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS prestacao_documentos ("
+        f" id {serial}, ol_id INTEGER NOT NULL REFERENCES ols(id), tipo TEXT NOT NULL,"
+        f" competencia TEXT, escopo TEXT NOT NULL DEFAULT 'individual',"
+        f" nome_arquivo TEXT, mime TEXT, arquivo {blob},"
+        f" status TEXT NOT NULL DEFAULT 'pendente',"
+        f" criado_por INTEGER REFERENCES usuarios(id),"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS prestacao_valores ("
+        f" id {serial}, documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),"
+        f" motoboy_id INTEGER REFERENCES motoboys(id), tipo TEXT, valor {valor_tipo})")
+    conn.execute("CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT)")
+    # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
+    if pg:
+        # PG: IF NOT EXISTS evita erro que abortaria a transação.
+        conn.execute("ALTER TABLE prestacao_valores ADD COLUMN IF NOT EXISTS tipo TEXT")
+    else:
+        try:
+            conn.execute("ALTER TABLE prestacao_valores ADD COLUMN tipo TEXT")
+        except Exception:
+            pass
+    conn.commit()
+
+
+def get_config(conn, chave, default=None):
+    r = conn.execute("SELECT valor FROM configuracoes WHERE chave=?", (chave,)).fetchone()
+    return r["valor"] if r else default
+
+
+def set_config(conn, chave, valor):
+    if usando_pg():
+        conn.execute("INSERT INTO configuracoes (chave, valor) VALUES (?,?) "
+                     "ON CONFLICT (chave) DO UPDATE SET valor=EXCLUDED.valor", (chave, valor))
+    else:
+        conn.execute("INSERT INTO configuracoes (chave, valor) VALUES (?,?) "
+                     "ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor", (chave, valor))
+
+
 def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, nome_arquivo, mime,
                      arquivo_bytes, valores, criado_por):
-    """Salva um documento de prestação de contas + os valores por motoboy.
-    valores: lista de tuplas (motoboy_id, valor). Devolve o id do documento."""
+    """Salva um documento de prestação de contas + os valores.
+    valores: lista de tuplas (motoboy_id, tipo, valor). Devolve o id do documento."""
     doc_id = _inserir_id(
         conn,
         "INSERT INTO prestacao_documentos "
         "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, arquivo, criado_por) "
         "VALUES (?,?,?,?,?,?,?,?)",
         (ol_id, tipo, competencia, escopo, nome_arquivo, mime, arquivo_bytes, criado_por))
-    for motoboy_id, valor in valores:
+    for motoboy_id, tipo_item, valor in valores:
         conn.execute(
-            "INSERT INTO prestacao_valores (documento_id, motoboy_id, valor) VALUES (?,?,?)",
-            (doc_id, motoboy_id, valor))
+            "INSERT INTO prestacao_valores (documento_id, motoboy_id, tipo, valor) "
+            "VALUES (?,?,?,?)",
+            (doc_id, motoboy_id, tipo_item, valor))
     return doc_id

@@ -215,10 +215,69 @@ def _montar_msg_wpp(nome_motoboy, link):
     )
 
 
+def _tocar_alerta_sonoro():
+    """Toca um bipe de alerta (best-effort; o navegador pode exigir interação)."""
+    import streamlit.components.v1 as components
+    components.html(
+        """
+        <script>
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          if (ctx.state === 'suspended') { ctx.resume(); }
+          function beep(t, f) {
+            const o = ctx.createOscillator(), g = ctx.createGain();
+            o.connect(g); g.connect(ctx.destination);
+            o.type = 'sine'; o.frequency.value = f;
+            g.gain.setValueAtTime(0.0001, ctx.currentTime + t);
+            g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + t + 0.03);
+            g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.35);
+            o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.36);
+          }
+          beep(0, 880); beep(0.45, 880); beep(0.9, 988);
+        } catch (e) {}
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _lembrete_prestacao(conn, usuario):
+    """Lembrete de prazo de prestação de contas: aparece a partir de 1 semana
+    antes da data definida pelo admin, com alerta visual e sonoro."""
+    prazo_str = db.get_config(conn, "prazo_prestacao")
+    prazo = _data(prazo_str) if prazo_str else None
+    if not prazo:
+        return
+    dias = (prazo - HOJE).days
+    if dias > 7:
+        return  # ainda longe — não alerta
+
+    data_fmt = prazo.strftime("%d/%m/%Y")
+    if dias < 0:
+        st.error(f"🔴 **Prazo de prestação de contas VENCIDO** — era {data_fmt} "
+                 f"({abs(dias)} dia(s) atrás). Envie os documentos pendentes o quanto "
+                 "antes na aba **📑 Prestação de contas**.")
+    elif dias == 0:
+        st.warning(f"🟠 **Hoje é o ÚLTIMO DIA** da prestação de contas ({data_fmt})! "
+                   "Envie os documentos na aba **📑 Prestação de contas**.")
+    else:
+        st.warning(f"🟠 **Prazo de prestação de contas se aproximando:** faltam "
+                   f"**{dias} dia(s)** (até {data_fmt}). Não esqueça de enviar os "
+                   "documentos na aba **📑 Prestação de contas**.")
+
+    # Toca o som uma vez por sessão (por prazo) para não repetir a cada clique.
+    chave_som = f"_som_prazo_{prazo_str}"
+    if not st.session_state.get(chave_som):
+        st.session_state[chave_som] = True
+        _tocar_alerta_sonoro()
+
+
 def tela_ol(usuario):
     import urllib.parse
 
     conn = db.conectar()
+    db.garantir_tabelas_prestacao(conn)     # garante tabelas de prestação/config
+    _lembrete_prestacao(conn, usuario)      # lembrete de prazo (visual + sonoro)
     lojas = conn.execute("SELECT id, nome FROM lojas WHERE ativo = 1 ORDER BY nome").fetchall()
     mapa_lojas = {l["nome"]: l["id"] for l in lojas}
 
@@ -932,6 +991,7 @@ def tela_ol(usuario):
     # =========================================================================
     with aba_prestacao:
         ol_id = usuario["ol_id"]
+        db.garantir_tabelas_prestacao(conn)   # garante as tabelas (à prova de falhas)
         st.markdown("### 📑 Prestação de contas")
         st.caption(
             "Envie os comprovantes de pagamento aos motoboys (recibos assinados, "
@@ -944,6 +1004,7 @@ def tela_ol(usuario):
             "Combustível", "Guia FGTS / RE", "Férias e recibos",
             "Atestado / INSS (afastamento)", "Rescisão", "13º salário", "Pendências",
         ]
+        OUTROS = "Outros (vários documentos no mesmo arquivo)"
         MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
@@ -959,7 +1020,8 @@ def tela_ol(usuario):
         else:
             with st.container(border=True):
                 st.markdown("**Enviar novo documento**")
-                tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC, key="pc_tipo")
+                tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC + [OUTROS], key="pc_tipo")
+                eh_outros = tipo_doc == OUTROS
 
                 cm, ca = st.columns(2)
                 with cm:
@@ -975,17 +1037,32 @@ def tela_ol(usuario):
                     ["Um motoboy", "Geral (todos os motoboys)"],
                     horizontal=True, key="pc_escopo",
                 )
+                escopo_db = "geral" if escopo.startswith("Geral") else "individual"
 
-                valores = []        # (motoboy_id, valor)
-                escopo_db = "individual"
-                if escopo == "Um motoboy":
+                # Motoboy (quando individual)
+                mb_id_sel = None
+                if escopo_db == "individual":
                     mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
                     mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
+                    mb_id_sel = mapa_mb[mb_nome]
+
+                valores_pendentes = []     # (motoboy_id, tipo, valor)
+                tipos_sel = []
+                if eh_outros:
+                    # Arquivo único com vários documentos: marca quais e o valor de cada um.
+                    tipos_sel = st.multiselect(
+                        "Quais documentos estão neste arquivo?", TIPOS_DOC, key="pc_outros_tipos")
+                    if tipos_sel:
+                        st.caption("Informe o valor de cada documento contido no arquivo:")
+                        for t in tipos_sel:
+                            v = st.number_input(f"Valor — {t} (R$)", min_value=0.0, step=10.0,
+                                                format="%.2f", key=f"pc_outros_val_{t}")
+                            valores_pendentes.append((mb_id_sel, t, v))
+                elif escopo_db == "individual":
                     valor = st.number_input("Valor (R$) — deixe 0 se o documento não tiver valor",
                                             min_value=0.0, step=10.0, format="%.2f", key="pc_valor")
-                    valores_pendentes = [(mapa_mb[mb_nome], valor)]
+                    valores_pendentes = [(mb_id_sel, tipo_doc, valor)]
                 else:
-                    escopo_db = "geral"
                     st.caption("Informe o valor de cada motoboy (deixe 0 nos que não se aplicam).")
                     ids_ordem = [m["id"] for m in motoboys_ol]
                     linhas = [{"Motoboy": m["nome"], "Valor (R$)": 0.0} for m in motoboys_ol]
@@ -997,7 +1074,7 @@ def tela_ol(usuario):
                         },
                     )
                     rows = editado if isinstance(editado, list) else editado.to_dict("records")
-                    valores_pendentes = [(ids_ordem[i], r.get("Valor (R$)") or 0.0)
+                    valores_pendentes = [(ids_ordem[i], tipo_doc, r.get("Valor (R$)") or 0.0)
                                          for i, r in enumerate(rows)]
 
                 arquivo = st.file_uploader(
@@ -1007,19 +1084,23 @@ def tela_ol(usuario):
                 if st.button("📤 Enviar documento", type="primary", use_container_width=True):
                     if not arquivo:
                         st.error("Anexe o arquivo do documento.")
+                    elif eh_outros and not tipos_sel:
+                        st.error("Marque quais documentos estão contidos no arquivo.")
                     else:
                         # mantém só os valores informados (> 0); 0 = sem valor
-                        valores = [(mid, round(float(v), 2)) for mid, v in valores_pendentes if v and v > 0]
+                        valores = [(mid, t, round(float(v), 2))
+                                   for mid, t, v in valores_pendentes if v and v > 0]
+                        tipo_final = "Outros" if eh_outros else tipo_doc
                         competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
                         try:
                             doc_id = db.salvar_prestacao(
-                                conn, ol_id, tipo_doc, competencia, escopo_db,
+                                conn, ol_id, tipo_final, competencia, escopo_db,
                                 arquivo.name, arquivo.type or "application/octet-stream",
                                 arquivo.getvalue(), valores, usuario["id"])
                             db.auditar(conn, usuario["id"], "prestacao_contas",
-                                       "documento", doc_id, f"{tipo_doc} — {competencia}")
+                                       "documento", doc_id, f"{tipo_final} — {competencia}")
                             conn.commit()
-                            st.success(f"✅ Documento enviado! ({tipo_doc} — {mes_sel}/{ano_sel})")
+                            st.success(f"✅ Documento enviado! ({tipo_final} — {mes_sel}/{ano_sel})")
                             st.rerun()
                         except Exception as ex:
                             st.error(f"Erro ao salvar: {ex}")
@@ -1056,6 +1137,20 @@ def tela_ol(usuario):
                 sel = st.selectbox("Baixar ou remover um documento", list(mapa_doc.keys()),
                                    key="pc_sel_doc")
                 doc_id_sel = mapa_doc[sel]
+
+                # Detalhamento dos valores do documento escolhido
+                vals_ol = conn.execute(
+                    "SELECT m.nome, pv.tipo, pv.valor FROM prestacao_valores pv "
+                    "LEFT JOIN motoboys m ON m.id=pv.motoboy_id "
+                    "WHERE pv.documento_id=? ORDER BY pv.tipo, m.nome", (doc_id_sel,)).fetchall()
+                if vals_ol:
+                    st.dataframe(
+                        [{"Documento": v["tipo"] or "—",
+                          "Motoboy": v["nome"] or "(geral)",
+                          "Valor": f"R$ {v['valor']:.2f}" if v["valor"] else "—"}
+                         for v in vals_ol],
+                        use_container_width=True, hide_index=True)
+
                 cdl, crm = st.columns(2)
                 arq = conn.execute(
                     "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
@@ -1616,9 +1711,30 @@ def tela_admin(usuario):
     # ABA Prestações — visão do admin (todas as OLs)
     # =========================================================================
     with aba_prest:
+        db.garantir_tabelas_prestacao(conn)
         st.markdown("#### 📑 Prestações de contas — todas as OLs")
         st.caption("Documentos enviados pelas OLs. Baixe para conferir; o status "
                    "indica se já foi validado.")
+
+        # --- Prazo de entrega (dispara o lembrete nas OLs 1 semana antes) ---
+        with st.expander("⏰ Prazo de entrega da prestação de contas"):
+            prazo_atual = db.get_config(conn, "prazo_prestacao")
+            prazo_d = _data(prazo_atual) if prazo_atual else None
+            st.caption("A partir de 1 semana antes desta data, as OLs recebem um "
+                       "alerta (visual e sonoro) lembrando de enviar os documentos.")
+            novo_prazo = st.date_input("Data limite", value=prazo_d, format="DD/MM/YYYY",
+                                       key="adm_prazo")
+            cpz1, cpz2 = st.columns([1, 3])
+            if cpz1.button("Salvar prazo", type="primary"):
+                db.set_config(conn, "prazo_prestacao", str(novo_prazo))
+                conn.commit()
+                st.success(f"Prazo definido para {novo_prazo.strftime('%d/%m/%Y')}.")
+            if prazo_d and cpz2.button("Remover prazo"):
+                db.set_config(conn, "prazo_prestacao", "")
+                conn.commit()
+                st.rerun()
+            if prazo_d:
+                st.info(f"Prazo atual: **{prazo_d.strftime('%d/%m/%Y')}**.")
 
         ols_lst = conn.execute(
             "SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall()
@@ -1669,15 +1785,16 @@ def tela_admin(usuario):
             sel = st.selectbox("Abrir um documento", list(mapa.keys()), key="adm_pc_sel")
             did = mapa[sel]
 
-            # Valores por motoboy do documento
+            # Detalhamento de valores (por motoboy e/ou por tipo de documento)
             vals = conn.execute(
-                "SELECT m.nome, pv.valor FROM prestacao_valores pv "
+                "SELECT m.nome, pv.tipo, pv.valor FROM prestacao_valores pv "
                 "LEFT JOIN motoboys m ON m.id=pv.motoboy_id "
-                "WHERE pv.documento_id=? ORDER BY m.nome", (did,)).fetchall()
+                "WHERE pv.documento_id=? ORDER BY pv.tipo, m.nome", (did,)).fetchall()
             if vals:
-                st.markdown("**Valores por motoboy:**")
+                st.markdown("**Detalhamento de valores:**")
                 st.dataframe(
-                    [{"Motoboy": v["nome"] or "—",
+                    [{"Documento": v["tipo"] or "—",
+                      "Motoboy": v["nome"] or "(geral)",
                       "Valor": f"R$ {v['valor']:.2f}" if v["valor"] else "—"} for v in vals],
                     use_container_width=True, hide_index=True)
 
