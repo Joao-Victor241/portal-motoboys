@@ -13,6 +13,7 @@ Usuários: admin / ol_exemplo / operador. Senhas vêm dos Secrets/.env
 nos fallbacks de desenvolvimento.
 """
 
+# build: prestação de contas + lembrete de prazo (força redeploy limpo)
 import os
 import uuid
 from datetime import date, datetime, timedelta
