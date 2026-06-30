@@ -491,7 +491,7 @@ def tela_ol(usuario):
             conn.execute(
                 "INSERT INTO motoboys (cpf, nome, nascimento, cnh, cnh_venc, telefone) "
                 "VALUES (?,?,?,?,?,?) "
-                "ON CONFLICT(cpf) DO UPDATE SET nome=excluded.nome, nascimento=excluded.nascimento, "
+                "ON CONFLICT (cpf) DO UPDATE SET nome=excluded.nome, nascimento=excluded.nascimento, "
                 "cnh=excluded.cnh, cnh_venc=excluded.cnh_venc, "
                 "telefone=excluded.telefone",
                 (cpf_limpo, nome.strip(), str(nascimento), cnh.strip(),
@@ -504,7 +504,7 @@ def tela_ol(usuario):
                 conn.execute(
                     "INSERT INTO motoboys_ol (motoboy_id, ol_id, placa, tipo, valido_ate, criado_por) "
                     "VALUES (?,?,?,?,?,?) "
-                    "ON CONFLICT(motoboy_id, ol_id) DO UPDATE SET "
+                    "ON CONFLICT (motoboy_id, ol_id) DO UPDATE SET "
                     "placa=excluded.placa, tipo=excluded.tipo, valido_ate=excluded.valido_ate",
                     (motoboy_id, usuario["ol_id"], placa_norm, tipo,
                      str(valido_ate) if valido_ate else None, usuario["id"]))
@@ -750,7 +750,7 @@ def tela_ol(usuario):
             "JOIN cadastros c ON c.loja_id=l.id AND c.ol_id=? AND c.situacao='ativo' "
             "LEFT JOIN ol_loja_limite oll ON oll.ol_id=? AND oll.loja_id=l.id "
             "WHERE l.ativo=1 "
-            "GROUP BY l.id ORDER BY l.nome",
+            "GROUP BY l.id, l.nome, oll.limite ORDER BY l.nome",
             (usuario["ol_id"], usuario["ol_id"])
         ).fetchall()
 
@@ -911,7 +911,7 @@ def tela_ol(usuario):
                                             "INSERT INTO cadastros "
                                             "(motoboy_id, ol_id, loja_id, situacao, criado_por) "
                                             "VALUES (?,?,?,'ativo',?) "
-                                            "ON CONFLICT(motoboy_id, ol_id, loja_id) "
+                                            "ON CONFLICT (motoboy_id, ol_id, loja_id) "
                                             "DO UPDATE SET situacao='ativo'",
                                             (r["motoboy_id"], usuario["ol_id"],
                                              loja_id_sel, usuario["id"]))
@@ -1352,7 +1352,7 @@ def tela_admin(usuario):
                     for loja_id, lim in novos.items():
                         conn.execute(
                             "INSERT INTO ol_loja_limite (ol_id, loja_id, limite) VALUES (?,?,?) "
-                            "ON CONFLICT(ol_id, loja_id) DO UPDATE SET limite=excluded.limite",
+                            "ON CONFLICT (ol_id, loja_id) DO UPDATE SET limite=excluded.limite",
                             (ol["id"], loja_id, lim))
                     db.auditar(conn, usuario["id"], "ajuste_limites", "ol", ol["id"])
                     conn.commit()
@@ -1578,7 +1578,7 @@ def tela_admin(usuario):
                 "LEFT JOIN motoboys_ol mol ON mol.motoboy_id=m.id "
                 "LEFT JOIN ols o ON o.id=mol.ol_id "
                 "WHERE m.bloqueado_permanente=1 "
-                "GROUP BY m.id ORDER BY m.nome"
+                "GROUP BY m.id, m.nome, m.cpf, m.motivo_bloqueio ORDER BY m.nome"
             ).fetchall()
             if bloq_perm:
                 st.dataframe(
@@ -1628,7 +1628,7 @@ def tela_admin(usuario):
                         "FROM lojas l "
                         "LEFT JOIN ol_loja_limite oll ON oll.ol_id=? AND oll.loja_id=l.id "
                         "LEFT JOIN cadastros c ON c.loja_id=l.id AND c.ol_id=? AND c.situacao='ativo' "
-                        "WHERE l.ativo=1 GROUP BY l.id ORDER BY l.nome",
+                        "WHERE l.ativo=1 GROUP BY l.id, l.nome, oll.limite ORDER BY l.nome",
                         (o["id"], o["id"])
                     ).fetchall()
                     dados_loja = []
