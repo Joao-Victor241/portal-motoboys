@@ -460,15 +460,18 @@ LOJAS_KAIZEN = {
 }
 
 
-_INICIALIZADO = False
+# Guarda qual backend já foi inicializado nesta execução ('pg' ou 'sqlite').
+# Por backend (não só True/False) para reinicializar se trocar de banco em runtime.
+_BACKEND_INICIALIZADO = None
 
 
 def inicializar():
     """Cria as tabelas, aplica migrações e semeia dados de exemplo.
     Roda só UMA vez por processo (não a cada rerun do Streamlit) — evita
     contenção/lock no SQLite e custo desnecessário."""
-    global _INICIALIZADO, _SENHAS_SINCRONIZADAS
-    if _INICIALIZADO:
+    global _BACKEND_INICIALIZADO, _SENHAS_SINCRONIZADAS
+    backend = "pg" if usando_pg() else "sqlite"
+    if _BACKEND_INICIALIZADO == backend:
         return
 
     # ---- Caminho PostgreSQL (produção) ----
@@ -506,7 +509,7 @@ def inicializar():
             _SENHAS_SINCRONIZADAS = True
         conn.commit()
         conn.close()
-        _INICIALIZADO = True
+        _BACKEND_INICIALIZADO = backend
         return
 
     # ---- Caminho SQLite (desenvolvimento) ----
@@ -598,7 +601,7 @@ def inicializar():
 
     conn.commit()
     conn.close()
-    _INICIALIZADO = True
+    _BACKEND_INICIALIZADO = backend
 
 
 def criar_ol(conn, nome, cnpj, limite_global):
