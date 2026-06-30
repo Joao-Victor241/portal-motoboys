@@ -273,6 +273,22 @@ def _lembrete_prestacao(conn, usuario):
         _tocar_alerta_sonoro()
 
 
+def _arquivos_do_documento(conn, doc_id):
+    """Arquivos de um documento de prestação. Novos ficam em prestacao_arquivos;
+    documentos antigos têm 1 arquivo em prestacao_documentos.arquivo (legado)."""
+    arqs = conn.execute(
+        "SELECT nome_arquivo, mime, arquivo FROM prestacao_arquivos "
+        "WHERE documento_id=? ORDER BY id", (doc_id,)).fetchall()
+    if arqs:
+        return arqs
+    leg = conn.execute(
+        "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
+        (doc_id,)).fetchone()
+    if leg and leg["arquivo"] is not None:
+        return [leg]
+    return []
+
+
 def tela_ol(usuario):
     import urllib.parse
 
@@ -1078,13 +1094,14 @@ def tela_ol(usuario):
                     valores_pendentes = [(ids_ordem[i], tipo_doc, r.get("Valor (R$)") or 0.0)
                                          for i, r in enumerate(rows)]
 
-                arquivo = st.file_uploader(
-                    "Arquivo (PDF ou imagem do recibo assinado)",
-                    type=["pdf", "jpg", "jpeg", "png"], key="pc_file")
+                arquivos = st.file_uploader(
+                    "Arquivos (PDF ou imagem) — pode anexar mais de um",
+                    type=["pdf", "jpg", "jpeg", "png"],
+                    accept_multiple_files=True, key="pc_file")
 
                 if st.button("📤 Enviar documento", type="primary", use_container_width=True):
-                    if not arquivo:
-                        st.error("Anexe o arquivo do documento.")
+                    if not arquivos:
+                        st.error("Anexe ao menos um arquivo.")
                     elif eh_outros and not tipos_sel:
                         st.error("Marque quais documentos estão contidos no arquivo.")
                     else:
@@ -1093,15 +1110,18 @@ def tela_ol(usuario):
                                    for mid, t, v in valores_pendentes if v and v > 0]
                         tipo_final = "Outros" if eh_outros else tipo_doc
                         competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
+                        arquivos_dados = [(f.name, f.type or "application/octet-stream",
+                                           f.getvalue()) for f in arquivos]
                         try:
                             doc_id = db.salvar_prestacao(
                                 conn, ol_id, tipo_final, competencia, escopo_db,
-                                arquivo.name, arquivo.type or "application/octet-stream",
-                                arquivo.getvalue(), valores, usuario["id"])
+                                arquivos_dados, valores, usuario["id"])
                             db.auditar(conn, usuario["id"], "prestacao_contas",
-                                       "documento", doc_id, f"{tipo_final} — {competencia}")
+                                       "documento", doc_id,
+                                       f"{tipo_final} — {competencia} ({len(arquivos_dados)} arq.)")
                             conn.commit()
-                            st.success(f"✅ Documento enviado! ({tipo_final} — {mes_sel}/{ano_sel})")
+                            st.success(f"✅ Enviado! ({tipo_final} — {mes_sel}/{ano_sel}) · "
+                                       f"{len(arquivos_dados)} arquivo(s)")
                             st.rerun()
                         except Exception as ex:
                             st.error(f"Erro ao salvar: {ex}")
@@ -1152,17 +1172,18 @@ def tela_ol(usuario):
                          for v in vals_ol],
                         use_container_width=True, hide_index=True)
 
-                cdl, crm = st.columns(2)
-                arq = conn.execute(
-                    "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
-                    (doc_id_sel,)).fetchone()
-                if arq and arq["arquivo"] is not None:
-                    cdl.download_button(
-                        "📥 Baixar arquivo", data=bytes(arq["arquivo"]),
-                        file_name=arq["nome_arquivo"] or f"documento_{doc_id_sel}",
-                        mime=arq["mime"] or "application/octet-stream",
-                        use_container_width=True)
-                if crm.button("🗑️ Remover", use_container_width=True, key="pc_remover"):
+                arqs = _arquivos_do_documento(conn, doc_id_sel)
+                if arqs:
+                    st.markdown("**Arquivos:**")
+                    for i, a in enumerate(arqs):
+                        st.download_button(
+                            f"📥 {a['nome_arquivo'] or f'arquivo {i + 1}'}",
+                            data=bytes(a["arquivo"]),
+                            file_name=a["nome_arquivo"] or f"documento_{doc_id_sel}_{i + 1}",
+                            mime=a["mime"] or "application/octet-stream",
+                            key=f"pc_dl_{doc_id_sel}_{i}", use_container_width=True)
+                if st.button("🗑️ Remover documento", use_container_width=True, key="pc_remover"):
+                    conn.execute("DELETE FROM prestacao_arquivos WHERE documento_id=?", (doc_id_sel,))
                     conn.execute("DELETE FROM prestacao_valores WHERE documento_id=?", (doc_id_sel,))
                     conn.execute("DELETE FROM prestacao_documentos WHERE id=?", (doc_id_sel,))
                     db.auditar(conn, usuario["id"], "prestacao_removida", "documento", doc_id_sel)
@@ -1799,15 +1820,17 @@ def tela_admin(usuario):
                       "Valor": f"R$ {v['valor']:.2f}" if v["valor"] else "—"} for v in vals],
                     use_container_width=True, hide_index=True)
 
-            arq = conn.execute(
-                "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos WHERE id=?",
-                (did,)).fetchone()
-            b1, b2, b3 = st.columns(3)
-            if arq and arq["arquivo"] is not None:
-                b1.download_button(
-                    "📥 Baixar", data=bytes(arq["arquivo"]),
-                    file_name=arq["nome_arquivo"] or f"documento_{did}",
-                    mime=arq["mime"] or "application/octet-stream", use_container_width=True)
+            arqs = _arquivos_do_documento(conn, did)
+            if arqs:
+                st.markdown("**Arquivos:**")
+                for i, a in enumerate(arqs):
+                    st.download_button(
+                        f"📥 {a['nome_arquivo'] or f'arquivo {i + 1}'}",
+                        data=bytes(a["arquivo"]),
+                        file_name=a["nome_arquivo"] or f"documento_{did}_{i + 1}",
+                        mime=a["mime"] or "application/octet-stream",
+                        key=f"adm_pc_dl_{did}_{i}", use_container_width=True)
+            b2, b3 = st.columns(2)
             if b2.button("✅ Marcar validado", use_container_width=True, key="adm_pc_val"):
                 conn.execute("UPDATE prestacao_documentos SET status='validado' WHERE id=?", (did,))
                 conn.commit()
