@@ -314,7 +314,39 @@ def tela_ol(usuario):
         sub_novo, sub_editar = st.tabs(["➕ Novo", "✏️ Editar cadastro"])
 
     with sub_novo:
+        # Limpa o formulário (ANTES de criar os widgets) quando o último cadastro
+        # pediu — assim os campos ficam vazios prontos para o próximo motoboy.
+        if st.session_state.pop("_limpar_form", False):
+            for _k in ("c_nome", "c_cpf", "c_tel", "c_cnh", "c_placa",
+                       "c_nasc", "c_cnhvenc", "c_tipo", "c_validoate", "cnh_upload"):
+                st.session_state.pop(_k, None)
+
         st.markdown("### Cadastrar novo motoboy")
+
+        # Confirmação do último cadastro — fica visível mesmo após o formulário
+        # ser limpo, para a OL enviar o link e já iniciar outro cadastro.
+        _ok = st.session_state.get("_cadastro_ok")
+        if _ok:
+            with st.container(border=True):
+                st.success(f"✅ {_ok['nome']} cadastrado com sucesso!")
+                st.caption("Vá em **Meus motoboys** para ativar em uma loja quando quiser.")
+                if _ok.get("aviso"):
+                    st.warning(f"Cadastro salvo, mas falha no sistema de acesso "
+                               f"({_ok['aviso']}). Será reenviado.")
+                st.markdown("**📲 Link de cadastro facial** — envie ao motoboy:")
+                st.code(_ok["link"])
+                tel_ok = "".join(filter(str.isdigit, _ok.get("tel") or ""))
+                if tel_ok:
+                    msg_ok = _montar_msg_wpp(_ok["nome"], _ok["link"])
+                    st.link_button(
+                        "💬 Enviar pelo WhatsApp",
+                        f"https://wa.me/55{tel_ok}?text={urllib.parse.quote(msg_ok)}",
+                        type="primary", use_container_width=True)
+                if st.button("✖️ Ocultar mensagem", key="ocultar_cad_ok"):
+                    del st.session_state["_cadastro_ok"]
+                    st.rerun()
+            st.caption("👇 Formulário limpo — pronto para o próximo cadastro.")
+
         st.caption("Todos os campos são obrigatórios.")
 
         with st.expander("📷 Preencher automaticamente com foto da CNH"):
@@ -328,8 +360,8 @@ def tela_ol(usuario):
                         st.session_state["c_nome"] = d.get("nome") or ""
                         st.session_state["c_cpf"] = limpar_cpf(d.get("cpf") or "")
                         st.session_state["c_cnh"] = d.get("registro") or ""
-                        st.session_state["ocr_nasc"] = _data(d.get("nascimento"))
-                        st.session_state["ocr_venc"] = _data(d.get("validade"))
+                        st.session_state["c_nasc"] = _data(d.get("nascimento"))
+                        st.session_state["c_cnhvenc"] = _data(d.get("validade"))
                         st.success("CNH lida! Confira os campos abaixo antes de cadastrar.")
                     except Exception as e:
                         st.error(f"Não foi possível ler a CNH ({e}). Preencha manualmente.")
@@ -363,9 +395,10 @@ def tela_ol(usuario):
                         st.success("CPF válido ✓")
 
         with col3:
+            st.session_state.setdefault("c_nasc", None)
             nascimento = st.date_input(
                 "Data de nascimento (maior de 18 anos)",
-                value=st.session_state.get("ocr_nasc"),
+                key="c_nasc",
                 format="DD/MM/YYYY",
                 min_value=date(1950, 1, 1),
                 max_value=MAX_NASC,
@@ -387,9 +420,10 @@ def tela_ol(usuario):
             cnh = st.text_input("Número da CNH", key="c_cnh", placeholder="Ex: 12345678900")
 
         with col7:
+            st.session_state.setdefault("c_cnhvenc", None)
             cnh_venc = st.date_input(
                 "Vencimento da CNH",
-                value=st.session_state.get("ocr_venc"),
+                key="c_cnhvenc",
                 format="DD/MM/YYYY",
                 min_value=date(2000, 1, 1),
                 max_value=date(2100, 1, 1),
@@ -420,15 +454,17 @@ def tela_ol(usuario):
                 "Tipo de vínculo",
                 ["fixo", "free"],
                 horizontal=True,
+                key="c_tipo",
                 help="**Fixo:** permanente, sem prazo de saída.\n\n"
                      "**Free:** temporário, com data de encerramento obrigatória.",
             )
 
         with col10:
             if tipo == "free":
+                st.session_state.setdefault("c_validoate", None)
                 valido_ate = st.date_input(
                     "Válido até",
-                    value=None,
+                    key="c_validoate",
                     format="DD/MM/YYYY",
                     min_value=HOJE,
                     max_value=date(2100, 1, 1),
@@ -533,28 +569,17 @@ def tela_ol(usuario):
             # Atualiza o cache de CPFs do DMP para não remover o recém-cadastrado.
             _cpfs_no_dmp_cache.clear()
 
-            st.success(f"✅ {nome.strip()} cadastrado com sucesso!")
-            st.info("Agora vá em **Meus motoboys** para ativar este motoboy em uma loja.")
-            if aviso_dmp:
-                st.warning(f"Cadastro salvo, mas falha no sistema de acesso ({aviso_dmp}). Será reenviado.")
-
-            # ---- Envio do link de cadastro facial ---------------------------
-            st.divider()
-            st.markdown("#### 📲 Enviar link de cadastro facial ao motoboy")
-            st.caption(
-                "O motoboy precisa acessar o link abaixo para registrar o reconhecimento facial. "
-                "Sem esse passo, a catraca não libera a entrada."
-            )
-            st.code(link)
-
-            tel_limpo = "".join(filter(str.isdigit, telefone))
-            msg_wpp = _montar_msg_wpp(nome.strip(), link)
-            st.link_button(
-                "💬 Enviar pelo WhatsApp",
-                f"https://wa.me/55{tel_limpo}?text={urllib.parse.quote(msg_wpp)}",
-                use_container_width=True,
-                type="primary",
-            )
+            # Guarda a confirmação (mostrada no topo) e LIMPA o formulário para
+            # o próximo cadastro, sem apagar nada manualmente.
+            st.session_state["_cadastro_ok"] = {
+                "nome": nome.strip(), "link": link,
+                "tel": telefone, "aviso": aviso_dmp,
+            }
+            # A limpeza dos campos acontece no TOPO do próximo carregamento
+            # (antes dos widgets), senão o Streamlit não deixa alterá-los aqui.
+            st.session_state["_limpar_form"] = True
+            conn.close()
+            st.rerun()
 
     # =========================================================================
     # SUB-ABA — Editar cadastro
