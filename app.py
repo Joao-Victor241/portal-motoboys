@@ -2099,10 +2099,13 @@ def main():
         tela_selfie()
         return
 
-    # Roda a cada carregamento: suspende acesso de motoboys free vencidos às 18:30.
-    _desativar_free_vencidos()
-    # Sincroniza exclusões: quem foi apagado no DMP some do portal também.
-    _sincronizar_exclusoes_dmp()
+    # Tarefas de fundo (suspender free vencidos + sincronizar exclusões do DMP):
+    # rodam no máximo 1x por minuto, não a cada clique — deixa o app muito mais ágil.
+    import time as _time
+    if _time.time() - st.session_state.get("_ultimo_bg", 0) > 60:
+        st.session_state["_ultimo_bg"] = _time.time()
+        _desativar_free_vencidos()
+        _sincronizar_exclusoes_dmp()
 
     if "usuario" not in st.session_state:
         tela_login()

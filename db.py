@@ -118,16 +118,23 @@ class _ConexaoPG:
         self._raw.close()
 
 
+_SCHEMA_CRIADO = False
+
+
 def conectar():
     if usando_pg():
         import psycopg
+        global _SCHEMA_CRIADO
         raw = psycopg.connect(os.getenv("DATABASE_URL").strip(), autocommit=True)
         schema = _schema_pg()
         cur = raw.cursor()
-        try:
-            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-        except Exception:
-            pass
+        # CREATE SCHEMA só uma vez por processo (evita um round-trip a cada conexão).
+        if not _SCHEMA_CRIADO:
+            try:
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+            except Exception:
+                pass
+            _SCHEMA_CRIADO = True
         try:
             cur.execute(f'SET search_path TO "{schema}"')
         except Exception:
@@ -640,9 +647,16 @@ def _inserir_id(conn, sql, params):
     return conn.execute(sql, params).lastrowid
 
 
+_TABELAS_PRESTACAO_OK = False
+
+
 def garantir_tabelas_prestacao(conn):
     """Cria (se faltarem) as tabelas de prestação de contas e configurações.
-    Defensivo: garante que existam mesmo se o banco veio de uma versão antiga."""
+    Roda só UMA vez por processo (evita DDL a cada abertura de tela — deixa o app
+    muito mais rápido no PostgreSQL, onde cada comando é uma ida ao servidor)."""
+    global _TABELAS_PRESTACAO_OK
+    if _TABELAS_PRESTACAO_OK:
+        return
     pg = usando_pg()
     serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     blob = "BYTEA" if pg else "BLOB"
@@ -675,6 +689,7 @@ def garantir_tabelas_prestacao(conn):
         except Exception:
             pass
     conn.commit()
+    _TABELAS_PRESTACAO_OK = True
 
 
 def get_config(conn, chave, default=None):
