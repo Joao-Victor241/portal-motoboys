@@ -1303,9 +1303,37 @@ def tela_admin(usuario):
                 else:
                     st.info("Nada para remover — portal e DMP já estão sincronizados.")
 
-    aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest = st.tabs(
+    aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest, aba_trein = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
-         "Base completa", "📊 Relatórios", "📑 Prestações"])
+         "Base completa", "📊 Relatórios", "📑 Prestações", "🎥 Treinamento"])
+
+    # --- Vídeo de treinamento (aparece no link da selfie) ---
+    with aba_trein:
+        st.caption("Vídeo de treinamento que o motoboy assiste no link da selfie, "
+                   "ANTES de tirar a foto — só no primeiro cadastro dele (por CPF).")
+        atual = db.get_video_treinamento(conn)
+        if atual:
+            st.success(f"Vídeo atual: **{atual['nome_arquivo'] or 'vídeo'}** — "
+                       f"enviado em {(atual['criado_em'] or '')[:16]}.")
+            st.video(bytes(atual["dados"]))
+            if st.button("🗑️ Remover vídeo atual"):
+                db.remover_video_treinamento(conn)
+                st.rerun()
+        else:
+            st.info("Nenhum vídeo cadastrado. Sem vídeo, o motoboy vai direto para a foto.")
+
+        st.markdown("**Enviar / substituir vídeo** (MP4 — recomendado curto, até ~25 MB, "
+                    "para carregar rápido no celular):")
+        up = st.file_uploader("Arquivo de vídeo", type=["mp4", "webm"], key="trein_up")
+        if up is not None:
+            tam_mb = up.size / (1024 * 1024)
+            if tam_mb > 25:
+                st.error(f"O vídeo tem {tam_mb:.0f} MB. Use um vídeo de até ~25 MB "
+                         "(mais curto ou mais comprimido) para não travar no celular.")
+            elif st.button("💾 Salvar vídeo de treinamento", type="primary"):
+                db.salvar_video_treinamento(conn, up.name, up.type or "video/mp4", up.read())
+                st.success("Vídeo salvo! Já aparece no link da selfie dos novos cadastros.")
+                st.rerun()
 
     # --- Cadastro de OLs ---
     with aba_ols:
@@ -2291,6 +2319,57 @@ def tela_operador(usuario):
 # Tela de selfie — pública, sem login, acessada pelo motoboy via link
 # ===========================================================================
 
+def _etapa_treinamento_video(video, link, token):
+    """Etapa obrigatória de vídeo antes da selfie. O vídeo não pode ser adiantado;
+    ao terminar, mostra um aviso. Para prosseguir, o motoboy confirma e clica em
+    Continuar (registra que assistiu). O player fica embutido (sem baixar)."""
+    import base64
+    import streamlit.components.v1 as components
+
+    st.markdown(f"### Olá, **{link['nome']}**!")
+    st.markdown(
+        "Antes de cadastrar sua foto, **assista ao vídeo de treinamento** abaixo. "
+        "O vídeo não pode ser adiantado — deixe rodar até o fim."
+    )
+
+    dados = bytes(video["dados"])
+    mime = video["mime"] or "video/mp4"
+    b64 = base64.b64encode(dados).decode()
+    html = """
+    <div style="font-family:sans-serif">
+      <video id="vt" width="100%" playsinline controls
+             controlsList="nodownload noplaybackrate noremoteplayback"
+             disablepictureinpicture style="border-radius:10px;background:#000">
+        <source src="data:%s;base64,%s">
+        Seu navegador não suporta a exibição deste vídeo.
+      </video>
+      <div id="fim" style="display:none;margin-top:10px;padding:10px;border-radius:8px;
+           background:#e6f4ea;color:#137333;font-weight:600;text-align:center">
+        ✅ Vídeo concluído! Role para baixo, confirme e continue para a foto.
+      </div>
+      <script>
+        const v = document.getElementById('vt');
+        let maxT = 0;
+        v.addEventListener('timeupdate', () => { if (v.currentTime > maxT) maxT = v.currentTime; });
+        v.addEventListener('seeking', () => { if (v.currentTime > maxT + 1.0) v.currentTime = maxT; });
+        v.addEventListener('ended', () => { document.getElementById('fim').style.display = 'block'; });
+      </script>
+    </div>""" % (mime, b64)
+    components.html(html, height=460)
+
+    st.markdown("---")
+    ok = st.checkbox("Confirmo que assisti ao vídeo de treinamento completo.",
+                     key=f"trein_chk_{token}")
+    if st.button("Continuar para a foto ▶", type="primary", disabled=not ok):
+        conn = db.conectar()
+        try:
+            db.marcar_treinamento_visto(conn, link["motoboy_id"])
+        finally:
+            conn.close()
+        st.session_state[f"trein_ok_{token}"] = True
+        st.rerun()
+
+
 def tela_selfie():
     """
     Página aberta pelo motoboy no celular para tirar a selfie.
@@ -2310,7 +2389,7 @@ def tela_selfie():
     try:
         link = conn.execute(
             "SELECT sl.token, sl.motoboy_id, sl.expira_em, sl.usado_em, "
-            "m.nome, m.cpf "
+            "m.nome, m.cpf, m.treinamento_em "
             "FROM selfie_links sl "
             "JOIN motoboys m ON m.id = sl.motoboy_id "
             "WHERE sl.token = ?",
@@ -2336,6 +2415,17 @@ def tela_selfie():
 
     nome = link["nome"]
     cpf  = link["cpf"]
+
+    # --- Etapa obrigatória: vídeo de treinamento (só no 1º cadastro do motoboy) ---
+    conn_v = db.conectar()
+    try:
+        video = db.get_video_treinamento(conn_v)
+    finally:
+        conn_v.close()
+    ja_assistiu = bool(link["treinamento_em"]) or st.session_state.get(f"trein_ok_{token}")
+    if video and not ja_assistiu:
+        _etapa_treinamento_video(video, link, token)
+        st.stop()
 
     st.markdown(f"### Olá, **{nome}**!")
     st.markdown(

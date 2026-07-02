@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS motoboys (
     bloqueado_permanente    INTEGER NOT NULL DEFAULT 0,
     motivo_bloqueio         TEXT,
     dmp_person_id           INTEGER,
+    treinamento_em          TEXT,
     criado_em               TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- motoboys_ol: vínculo permanente motoboy ↔ OL (sem loja).
@@ -349,6 +350,7 @@ CREATE TABLE IF NOT EXISTS motoboys (
     bloqueado_permanente    INTEGER NOT NULL DEFAULT 0,
     motivo_bloqueio         TEXT,
     dmp_person_id           BIGINT,
+    treinamento_em          TEXT,
     criado_em               TEXT NOT NULL DEFAULT {_TS}
 );
 CREATE TABLE IF NOT EXISTS motoboys_ol (
@@ -529,6 +531,7 @@ def inicializar():
                     conn.execute("UPDATE usuarios SET senha_hash=? WHERE login=?",
                                  (_hash(_senha_padrao(login)), login))
             _SENHAS_SINCRONIZADAS = True
+        _garantir_treinamento(conn)
         conn.commit()
         conn.close()
         _BACKEND_INICIALIZADO = backend
@@ -629,6 +632,7 @@ def inicializar():
                              (_hash(_senha_padrao(login)), login))
         _SENHAS_SINCRONIZADAS = True
 
+    _garantir_treinamento(conn)
     conn.commit()
     conn.close()
     _BACKEND_INICIALIZADO = backend
@@ -668,6 +672,53 @@ def _inserir_id(conn, sql, params):
     if usando_pg():
         return conn.execute(sql + " RETURNING id", params).fetchone()[0]
     return conn.execute(sql, params).lastrowid
+
+
+def _garantir_treinamento(conn):
+    """Cria a tabela do vídeo de treinamento e a coluna motoboys.treinamento_em
+    (idempotente). Chamado no inicializar, nos dois bancos."""
+    pg = usando_pg()
+    serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    blob = "BYTEA" if pg else "BLOB"
+    ts = "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')" if pg else "CURRENT_TIMESTAMP"
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS treinamento_video ("
+        f" id {serial}, nome_arquivo TEXT, mime TEXT, dados {blob},"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    if pg:
+        conn.execute("ALTER TABLE motoboys ADD COLUMN IF NOT EXISTS treinamento_em TEXT")
+    else:
+        try:
+            conn.execute("ALTER TABLE motoboys ADD COLUMN treinamento_em TEXT")
+        except Exception:
+            pass
+
+
+def salvar_video_treinamento(conn, nome, mime, dados):
+    """Guarda o vídeo de treinamento (mantém só o mais recente)."""
+    conn.execute("DELETE FROM treinamento_video")
+    conn.execute("INSERT INTO treinamento_video (nome_arquivo, mime, dados) VALUES (?,?,?)",
+                 (nome, mime, dados))
+    conn.commit()
+
+
+def get_video_treinamento(conn):
+    """Vídeo de treinamento atual (ou None)."""
+    return conn.execute(
+        "SELECT id, nome_arquivo, mime, dados, criado_em FROM treinamento_video "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def remover_video_treinamento(conn):
+    conn.execute("DELETE FROM treinamento_video")
+    conn.commit()
+
+
+def marcar_treinamento_visto(conn, motoboy_id):
+    """Marca que o motoboy já assistiu ao treinamento (1ª vez, por CPF)."""
+    conn.execute("UPDATE motoboys SET treinamento_em=? WHERE id=?",
+                 (_agora_br(), motoboy_id))
+    conn.commit()
 
 
 _TABELAS_PRESTACAO_OK = False
