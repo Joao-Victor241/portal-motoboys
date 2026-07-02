@@ -1,9 +1,10 @@
 """
 Portal de Motoboys — aplicação Streamlit (Fase 1).
 
-Login com 3 perfis (admin / ol / operador), cadastro de motoboy pela OL com
-validações em tempo real, painel do Admin (limites, bloqueio cross-OL, cadastro
-de OLs) e esboço do painel do operador. Roda em modo SIMULADO para DMP/SIAC.
+Login com 4 perfis (admin / ol / operador / financeiro), cadastro de motoboy
+pela OL com validações em tempo real, painel do Admin (limites, bloqueio
+cross-OL, cadastro de OLs), esboço do painel do operador e painel do financeiro
+(validação de documentos de prestação de contas por motoboy).
 
 Como rodar:
     pip install -r requirements.txt
@@ -1869,6 +1870,213 @@ def tela_admin(usuario):
 
 
 # ===========================================================================
+# Perfil Financeiro — validação de documentos de prestação de contas
+# ===========================================================================
+
+def _preview_arquivo(dados: bytes, mime: str, nome: str, chave: str):
+    """Mostra o arquivo NA TELA (sem baixar): imagem via st.image, PDF embutido.
+    Formatos não suportados caem no botão de download."""
+    import streamlit.components.v1 as components
+    mime = (mime or "").lower()
+    nm = (nome or "").lower()
+    if mime.startswith("image/") or nm.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+        st.image(dados, use_container_width=True)
+    elif mime == "application/pdf" or nm.endswith(".pdf"):
+        import base64
+        b64 = base64.b64encode(dados).decode()
+        components.html(
+            f'<iframe src="data:application/pdf;base64,{b64}" '
+            f'width="100%" height="600" style="border:1px solid #d0d0d0;border-radius:8px;"></iframe>',
+            height=620)
+    else:
+        st.info("Pré-visualização indisponível para este formato — use o botão de download abaixo.")
+
+
+def tela_financeiro(usuario):
+    st.header("💰 Financeiro — Validação de documentos")
+    st.caption("Confira e valide os documentos enviados pelas OLs, separados por motoboy, "
+               "sem sair do portal.")
+
+    conn = db.conectar()
+    db.garantir_tabelas_prestacao(conn)
+
+    # ---- Filtros -----------------------------------------------------------
+    ols_lst = conn.execute("SELECT id, nome FROM ols ORDER BY nome").fetchall()
+    ol_map = {o["nome"]: o["id"] for o in ols_lst}
+    comps = conn.execute(
+        "SELECT DISTINCT competencia FROM prestacao_documentos "
+        "WHERE competencia IS NOT NULL ORDER BY competencia DESC").fetchall()
+
+    f1, f2, f3 = st.columns(3)
+    filtro_ol = f1.selectbox("OL", ["Todas"] + list(ol_map.keys()), key="fin_ol")
+    filtro_comp = f2.selectbox("Competência", ["Todas"] + [c["competencia"] for c in comps],
+                               key="fin_comp")
+    filtro_status = f3.selectbox("Status", ["Todos", "Pendente", "Validado", "Rejeitado"],
+                                 key="fin_status")
+
+    where_pd, params_pd = [], []
+    if filtro_ol != "Todas":
+        where_pd.append("pd.ol_id=?"); params_pd.append(ol_map[filtro_ol])
+    if filtro_comp != "Todas":
+        where_pd.append("pd.competencia=?"); params_pd.append(filtro_comp)
+    if filtro_status != "Todos":
+        where_pd.append("pd.status=?"); params_pd.append(filtro_status.lower())
+
+    # ---- Lista de motoboys com documentos ---------------------------------
+    q_mb = ("SELECT DISTINCT m.id AS mid, m.nome AS nome FROM motoboys m "
+            "JOIN prestacao_valores pv ON pv.motoboy_id=m.id "
+            "JOIN prestacao_documentos pd ON pd.id=pv.documento_id")
+    if where_pd:
+        q_mb += " WHERE " + " AND ".join(where_pd)
+    q_mb += " ORDER BY m.nome"
+    motoboys = conn.execute(q_mb, params_pd).fetchall()
+
+    # Documentos "gerais" (sem motoboy específico) — ficam num grupo à parte.
+    base_geral = ("FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
+                  "WHERE pd.id NOT IN "
+                  "(SELECT documento_id FROM prestacao_valores WHERE motoboy_id IS NOT NULL)")
+    if where_pd:
+        base_geral += " AND " + " AND ".join(where_pd)
+    geral_count = conn.execute("SELECT COUNT(*) " + base_geral, params_pd).fetchone()[0]
+
+    opcoes = [(f"👤 {m['nome']}", m["mid"]) for m in motoboys]
+    if geral_count:
+        opcoes.append(("📋 Gerais (sem motoboy específico)", None))
+
+    if not opcoes:
+        st.info("Nenhum documento enviado ainda (ou nenhum bate com os filtros).")
+        conn.close()
+        return
+
+    st.divider()
+    labels = [o[0] for o in opcoes]
+    escolha = st.selectbox("Motoboy", labels, key="fin_motoboy")
+    mid = dict((o[0], o[1]) for o in opcoes)[escolha]
+
+    # ---- Documentos do motoboy (ou gerais) selecionado --------------------
+    cols_doc = ("pd.id, o.nome AS ol, pd.tipo, pd.competencia, pd.escopo, pd.status, "
+                "pd.criado_em, pd.val_legivel, pd.val_assinatura, pd.val_valor, "
+                "pd.obs_validacao, pd.validado_em")
+    if mid is None:
+        docs = conn.execute(f"SELECT {cols_doc} {base_geral} ORDER BY pd.id DESC",
+                            params_pd).fetchall()
+    else:
+        q_docs = (f"SELECT {cols_doc} FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
+                  "WHERE pd.id IN (SELECT documento_id FROM prestacao_valores WHERE motoboy_id=?)")
+        p = [mid]
+        if where_pd:
+            q_docs += " AND " + " AND ".join(where_pd); p += params_pd
+        q_docs += " ORDER BY pd.id DESC"
+        docs = conn.execute(q_docs, p).fetchall()
+
+    if not docs:
+        st.info("Nenhum documento para esta seleção.")
+        conn.close()
+        return
+
+    # ---- Navegação (passar de um documento para o outro) ------------------
+    n = len(docs)
+    idx_key = f"fin_idx_{mid}"
+    idx = max(0, min(st.session_state.get(idx_key, 0), n - 1))
+
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    if nav1.button("◀ Anterior", use_container_width=True, disabled=(idx <= 0),
+                   key="fin_prev"):
+        st.session_state[idx_key] = idx - 1
+        st.rerun()
+    nav2.markdown(f"<div style='text-align:center;padding-top:6px'>Documento "
+                  f"<b>{idx + 1}</b> de <b>{n}</b></div>", unsafe_allow_html=True)
+    if nav3.button("Próximo ▶", use_container_width=True, disabled=(idx >= n - 1),
+                   key="fin_next"):
+        st.session_state[idx_key] = idx + 1
+        st.rerun()
+
+    doc = docs[idx]
+    did = doc["id"]
+
+    # ---- Cabeçalho do documento -------------------------------------------
+    status_badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado"}.get(
+        doc["status"], "🕒 Pendente")
+    st.markdown(f"### {doc['tipo']}  &nbsp; {status_badge}")
+    meta = f"**OL:** {doc['ol']}  ·  **Competência:** {doc['competencia'] or '—'}  ·  " \
+           f"**Escopo:** {'Geral' if doc['escopo'] == 'geral' else 'Individual'}  ·  " \
+           f"**Enviado em:** {(doc['criado_em'] or '')[:16].replace('T', ' ')}"
+    st.markdown(meta)
+
+    # Valores referentes a este motoboy (ou totais, se grupo geral)
+    if mid is None:
+        vals = conn.execute(
+            "SELECT tipo, COALESCE(SUM(valor),0) AS v FROM prestacao_valores "
+            "WHERE documento_id=? GROUP BY tipo", (did,)).fetchall()
+    else:
+        vals = conn.execute(
+            "SELECT tipo, COALESCE(SUM(valor),0) AS v FROM prestacao_valores "
+            "WHERE documento_id=? AND motoboy_id=? GROUP BY tipo", (did, mid)).fetchall()
+    if vals:
+        total = sum((v["v"] or 0) for v in vals)
+        st.dataframe(
+            [{"Documento": v["tipo"] or doc["tipo"],
+              "Valor": f"R$ {(v['v'] or 0):.2f}"} for v in vals],
+            use_container_width=True, hide_index=True)
+        st.markdown(f"**Total referente:** R$ {total:.2f}")
+
+    st.divider()
+
+    # ---- Pré-visualização dos arquivos (sem baixar) -----------------------
+    arqs = _arquivos_do_documento(conn, did)
+    col_prev, col_val = st.columns([3, 2])
+
+    with col_prev:
+        st.markdown("#### 📄 Documento(s)")
+        if not arqs:
+            st.warning("Sem arquivo anexado.")
+        for i, a in enumerate(arqs):
+            dados = bytes(a["arquivo"])
+            nome = a["nome_arquivo"] or f"arquivo {i + 1}"
+            if len(arqs) > 1:
+                st.markdown(f"**Arquivo {i + 1}/{len(arqs)} — {nome}**")
+            _preview_arquivo(dados, a["mime"], nome, f"{did}_{i}")
+            st.download_button(
+                "📥 Baixar", data=dados, file_name=nome,
+                mime=a["mime"] or "application/octet-stream",
+                key=f"fin_dl_{did}_{i}", use_container_width=True)
+
+    # ---- Checklist de validação -------------------------------------------
+    with col_val:
+        st.markdown("#### ✔️ Conferência")
+        c1 = st.checkbox("Documento legível / completo",
+                         value=bool(doc["val_legivel"]), key=f"fin_leg_{did}")
+        c2 = st.checkbox("Assinatura confere",
+                         value=bool(doc["val_assinatura"]), key=f"fin_ass_{did}")
+        c3 = st.checkbox("Valor confere",
+                         value=bool(doc["val_valor"]), key=f"fin_val_{did}")
+        obs = st.text_area("Observação (opcional)", value=doc["obs_validacao"] or "",
+                           key=f"fin_obs_{did}", height=90)
+
+        bok, brej = st.columns(2)
+        if bok.button("✅ Validar", type="primary", use_container_width=True,
+                      key=f"fin_ok_{did}"):
+            db.validar_documento(conn, did, c1, c2, c3, "validado",
+                                 obs.strip() or None, usuario["id"])
+            if idx < n - 1:
+                st.session_state[idx_key] = idx + 1  # já avança para o próximo
+            st.toast("Documento validado ✅")
+            conn.close()
+            st.rerun()
+        if brej.button("❌ Rejeitar", use_container_width=True, key=f"fin_rej_{did}"):
+            db.validar_documento(conn, did, c1, c2, c3, "rejeitado",
+                                 obs.strip() or None, usuario["id"])
+            st.toast("Documento rejeitado ❌")
+            conn.close()
+            st.rerun()
+
+        if doc["validado_em"]:
+            st.caption(f"Última validação: {doc['validado_em']}")
+
+    conn.close()
+
+
+# ===========================================================================
 # Perfil Operador — fila / motos (esboço; depende dos eventos do DMP)
 # ===========================================================================
 
@@ -2148,6 +2356,8 @@ def main():
         tela_admin(usuario)
     elif usuario["perfil"] == "ol":
         tela_ol(usuario)
+    elif usuario["perfil"] == "financeiro":
+        tela_financeiro(usuario)
     else:
         tela_operador(usuario)
 

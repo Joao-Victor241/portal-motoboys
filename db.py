@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     login       TEXT UNIQUE NOT NULL,
     senha_hash  TEXT NOT NULL,
-    perfil      TEXT NOT NULL CHECK (perfil IN ('admin','ol','operador')),
+    perfil      TEXT NOT NULL,
     ol_id       INTEGER REFERENCES ols(id),
     ativo       INTEGER NOT NULL DEFAULT 1
 );
@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     id          SERIAL PRIMARY KEY,
     login       TEXT UNIQUE NOT NULL,
     senha_hash  TEXT NOT NULL,
-    perfil      TEXT NOT NULL CHECK (perfil IN ('admin','ol','operador')),
+    perfil      TEXT NOT NULL,
     ol_id       INTEGER REFERENCES ols(id),
     ativo       INTEGER NOT NULL DEFAULT 1
 );
@@ -448,6 +448,7 @@ _MAPA_SENHA_ENV = {
     "admin":      ("ADMIN_PASSWORD", "admin123"),
     "ol_exemplo": ("OL_EXEMPLO_PASSWORD", "ol123"),
     "operador":   ("OPERADOR_PASSWORD", "op123"),
+    "financeiro": ("FINANCEIRO_PASSWORD", "fin123"),
 }
 _SENHAS_SINCRONIZADAS = False
 
@@ -507,6 +508,15 @@ def inicializar():
                          ("ol_exemplo", _hash(_senha_padrao("ol_exemplo")), "ol", ol_id))
             conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
                          ("operador", _hash(_senha_padrao("operador")), "operador"))
+        # Garante o perfil financeiro (novo) mesmo em bancos já existentes.
+        # Remove o CHECK antigo de perfil (não incluía 'financeiro') antes de inserir.
+        try:
+            conn.execute("ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_perfil_check")
+        except Exception:
+            pass
+        if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='financeiro'").fetchone()[0] == 0:
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("financeiro", _hash(_senha_padrao("financeiro")), "financeiro"))
         # Sincroniza senhas com os Secrets (1x por processo).
         if not _SENHAS_SINCRONIZADAS:
             for login, (chave, _fb) in _MAPA_SENHA_ENV.items():
@@ -596,6 +606,14 @@ def inicializar():
         conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
                      ("operador", _hash(_senha_padrao("operador")), "operador"))
 
+    # Garante o perfil financeiro (novo) mesmo em bancos já existentes.
+    if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='financeiro'").fetchone()[0] == 0:
+        try:
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("financeiro", _hash(_senha_padrao("financeiro")), "financeiro"))
+        except Exception:
+            pass
+
     # Sincroniza as senhas dos usuários padrão com os Secrets (1x por processo).
     # Só atualiza quando a variável de ambiente estiver definida — assim, definir
     # ADMIN_PASSWORD/etc. nos Secrets passa a valer mesmo se o banco já existia.
@@ -680,14 +698,27 @@ def garantir_tabelas_prestacao(conn):
         f" nome_arquivo TEXT, mime TEXT, arquivo {blob})")
     conn.execute("CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT)")
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
-    if pg:
-        # PG: IF NOT EXISTS evita erro que abortaria a transação.
-        conn.execute("ALTER TABLE prestacao_valores ADD COLUMN IF NOT EXISTS tipo TEXT")
-    else:
-        try:
-            conn.execute("ALTER TABLE prestacao_valores ADD COLUMN tipo TEXT")
-        except Exception:
-            pass
+    # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
+    _cols_valores = [("tipo", "TEXT")]
+    _cols_docs = [
+        ("val_legivel", "INTEGER DEFAULT 0"),     # checklist: documento legível
+        ("val_assinatura", "INTEGER DEFAULT 0"),  # checklist: assinatura confere
+        ("val_valor", "INTEGER DEFAULT 0"),       # checklist: valor confere
+        ("obs_validacao", "TEXT"),                # observação do financeiro
+        ("validado_por", "INTEGER"),              # usuário financeiro que validou
+        ("validado_em", "TEXT"),                  # data/hora da validação
+    ]
+    for tabela, colunas in (("prestacao_valores", _cols_valores),
+                            ("prestacao_documentos", _cols_docs)):
+        for nome_col, tipo_col in colunas:
+            if pg:
+                # PG: IF NOT EXISTS evita erro que abortaria a transação.
+                conn.execute(f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS {nome_col} {tipo_col}")
+            else:
+                try:
+                    conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome_col} {tipo_col}")
+                except Exception:
+                    pass
     conn.commit()
     _TABELAS_PRESTACAO_OK = True
 
@@ -728,3 +759,16 @@ def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, arquivos, valores, 
             "INSERT INTO prestacao_valores (documento_id, motoboy_id, tipo, valor) "
             "VALUES (?,?,?,?)", (doc_id, motoboy_id, tipo_item, valor))
     return doc_id
+
+
+def validar_documento(conn, doc_id, legivel, assinatura, valor_ok, status, obs, validado_por):
+    """Registra a validação de um documento pelo financeiro (checklist + status).
+    status: 'validado' | 'rejeitado' | 'pendente'. Guarda a autoria e o horário (BR)."""
+    from datetime import datetime, timezone, timedelta
+    agora = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE prestacao_documentos SET val_legivel=?, val_assinatura=?, val_valor=?, "
+        "status=?, obs_validacao=?, validado_por=?, validado_em=? WHERE id=?",
+        (1 if legivel else 0, 1 if assinatura else 0, 1 if valor_ok else 0,
+         status, obs, validado_por, agora, doc_id))
+    conn.commit()
