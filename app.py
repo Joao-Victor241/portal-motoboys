@@ -1873,21 +1873,53 @@ def tela_admin(usuario):
 # Perfil Financeiro — validação de documentos de prestação de contas
 # ===========================================================================
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def _pdf_para_imagens(dados: bytes, dpi: int = 130, max_paginas: int = 25):
+    """Renderiza as páginas de um PDF como PNG (no servidor) para exibir com st.image.
+    Assim o PDF aparece em qualquer navegador, sem depender do visualizador nativo
+    (que o Streamlit bloqueia por rodar num iframe sandbox). Em cache pelos bytes."""
+    import fitz  # PyMuPDF
+    doc = fitz.open(stream=dados, filetype="pdf")
+    total = doc.page_count
+    imagens = []
+    for i, page in enumerate(doc):
+        if i >= max_paginas:
+            break
+        pix = page.get_pixmap(dpi=dpi)
+        imagens.append(pix.tobytes("png"))
+    doc.close()
+    return imagens, total
+
+
 def _preview_arquivo(dados: bytes, mime: str, nome: str, chave: str):
-    """Mostra o arquivo NA TELA (sem baixar): imagem via st.image, PDF embutido.
-    Formatos não suportados caem no botão de download."""
-    import streamlit.components.v1 as components
+    """Mostra o arquivo NA TELA (sem baixar): imagem via st.image; PDF renderizado
+    página a página como imagem. Formatos não suportados caem no download."""
     mime = (mime or "").lower()
     nm = (nome or "").lower()
     if mime.startswith("image/") or nm.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
         st.image(dados, use_container_width=True)
     elif mime == "application/pdf" or nm.endswith(".pdf"):
-        import base64
-        b64 = base64.b64encode(dados).decode()
-        components.html(
-            f'<iframe src="data:application/pdf;base64,{b64}" '
-            f'width="100%" height="600" style="border:1px solid #d0d0d0;border-radius:8px;"></iframe>',
-            height=620)
+        try:
+            imagens, total = _pdf_para_imagens(dados)
+            if not imagens:
+                raise ValueError("PDF sem páginas renderizáveis")
+            for img in imagens:
+                st.image(img, use_container_width=True)
+            if total > len(imagens):
+                st.caption(f"Mostrando {len(imagens)} de {total} páginas — "
+                           "baixe o arquivo para ver todas.")
+            elif total > 1:
+                st.caption(f"{total} páginas.")
+        except Exception:
+            # Fallback: tenta embutir o PDF (pode não renderizar em alguns navegadores).
+            import base64
+            import streamlit.components.v1 as components
+            b64 = base64.b64encode(dados).decode()
+            components.html(
+                f'<iframe src="data:application/pdf;base64,{b64}" width="100%" '
+                f'height="600" style="border:1px solid #d0d0d0;border-radius:8px;"></iframe>',
+                height=620)
+            st.caption("Se o PDF não aparecer acima, use o botão **Baixar**.")
     else:
         st.info("Pré-visualização indisponível para este formato — use o botão de download abaixo.")
 
