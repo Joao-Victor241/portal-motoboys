@@ -509,9 +509,14 @@ def inicializar():
             conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
                          ("operador", _hash(_senha_padrao("operador")), "operador"))
         # Garante o perfil financeiro (novo) mesmo em bancos já existentes.
-        # Remove o CHECK antigo de perfil (não incluía 'financeiro') antes de inserir.
+        # Remove QUALQUER CHECK de perfil (o nome gerado pode variar) buscando o
+        # nome real no catálogo — assim o INSERT abaixo nunca esbarra no CHECK antigo.
         try:
-            conn.execute("ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_perfil_check")
+            cons = conn.execute(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid='usuarios'::regclass AND contype='c'").fetchall()
+            for cc in cons:
+                conn.execute(f'ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS "{cc[0]}"')
         except Exception:
             pass
         if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='financeiro'").fetchone()[0] == 0:
