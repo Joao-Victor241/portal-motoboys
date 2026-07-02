@@ -705,7 +705,10 @@ def garantir_tabelas_prestacao(conn):
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
     # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
     _cols_valores = [("tipo", "TEXT")]
-    _cols_docs = [
+    # Colunas de validação: existem TANTO no documento (envio) quanto em cada
+    # arquivo — a validação é feita por arquivo (independente), e o status do
+    # documento passa a ser o resumo dos seus arquivos.
+    _cols_val = [
         ("val_legivel", "INTEGER DEFAULT 0"),     # checklist: documento legível
         ("val_assinatura", "INTEGER DEFAULT 0"),  # checklist: assinatura confere
         ("val_valor", "INTEGER DEFAULT 0"),       # checklist: valor confere
@@ -713,8 +716,10 @@ def garantir_tabelas_prestacao(conn):
         ("validado_por", "INTEGER"),              # usuário financeiro que validou
         ("validado_em", "TEXT"),                  # data/hora da validação
     ]
+    _cols_arqs = [("status", "TEXT DEFAULT 'pendente'")] + _cols_val
     for tabela, colunas in (("prestacao_valores", _cols_valores),
-                            ("prestacao_documentos", _cols_docs)):
+                            ("prestacao_documentos", _cols_val),
+                            ("prestacao_arquivos", _cols_arqs)):
         for nome_col, tipo_col in colunas:
             if pg:
                 # PG: IF NOT EXISTS evita erro que abortaria a transação.
@@ -766,14 +771,43 @@ def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, arquivos, valores, 
     return doc_id
 
 
+def _agora_br():
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def validar_documento(conn, doc_id, legivel, assinatura, valor_ok, status, obs, validado_por):
     """Registra a validação de um documento pelo financeiro (checklist + status).
+    Usado para documentos LEGADOS (1 arquivo embutido no próprio documento).
     status: 'validado' | 'rejeitado' | 'pendente'. Guarda a autoria e o horário (BR)."""
-    from datetime import datetime, timezone, timedelta
-    agora = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "UPDATE prestacao_documentos SET val_legivel=?, val_assinatura=?, val_valor=?, "
         "status=?, obs_validacao=?, validado_por=?, validado_em=? WHERE id=?",
         (1 if legivel else 0, 1 if assinatura else 0, 1 if valor_ok else 0,
-         status, obs, validado_por, agora, doc_id))
+         status, obs, validado_por, _agora_br(), doc_id))
+    conn.commit()
+
+
+def validar_arquivo(conn, arquivo_id, legivel, assinatura, valor_ok, status, obs, validado_por):
+    """Valida UM arquivo (documento) de um envio, de forma independente dos demais.
+    Depois recalcula o status do envio (documento-pai): rejeitado se qualquer arquivo
+    foi rejeitado; validado se TODOS foram validados; senão pendente."""
+    conn.execute(
+        "UPDATE prestacao_arquivos SET val_legivel=?, val_assinatura=?, val_valor=?, "
+        "status=?, obs_validacao=?, validado_por=?, validado_em=? WHERE id=?",
+        (1 if legivel else 0, 1 if assinatura else 0, 1 if valor_ok else 0,
+         status, obs, validado_por, _agora_br(), arquivo_id))
+    linha = conn.execute("SELECT documento_id FROM prestacao_arquivos WHERE id=?",
+                         (arquivo_id,)).fetchone()
+    if linha:
+        did = linha[0]
+        sts = [(r[0] or "pendente") for r in conn.execute(
+            "SELECT status FROM prestacao_arquivos WHERE documento_id=?", (did,)).fetchall()]
+        if any(s == "rejeitado" for s in sts):
+            resumo = "rejeitado"
+        elif sts and all(s == "validado" for s in sts):
+            resumo = "validado"
+        else:
+            resumo = "pendente"
+        conn.execute("UPDATE prestacao_documentos SET status=? WHERE id=?", (resumo, did))
     conn.commit()

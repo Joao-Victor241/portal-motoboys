@@ -1892,6 +1892,48 @@ def _preview_arquivo(dados: bytes, mime: str, nome: str, chave: str):
         st.info("Pré-visualização indisponível para este formato — use o botão de download abaixo.")
 
 
+def _bloco_validacao(conn, dados, mime, nome, cur, key_prefix, salvar_fn):
+    """Renderiza UM documento: preview (sem baixar) + checklist + validar/rejeitar,
+    de forma independente dos demais. `cur` traz o estado atual (dict); `salvar_fn`
+    (legivel, assinatura, valor_ok, status, obs) grava. Fecha a conexão antes do rerun."""
+    badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado"}.get(
+        cur.get("status"), "🕒 Pendente")
+    with st.container(border=True):
+        st.markdown(f"**{nome}** &nbsp; {badge}")
+        cprev, cval = st.columns([3, 2])
+        with cprev:
+            if dados is not None:
+                _preview_arquivo(dados, mime, nome, key_prefix)
+                st.download_button("📥 Baixar", data=dados, file_name=nome,
+                                   mime=mime or "application/octet-stream",
+                                   key=f"dl_{key_prefix}", use_container_width=True)
+            else:
+                st.warning("Sem arquivo anexado.")
+        with cval:
+            c1 = st.checkbox("Documento legível / completo",
+                             value=bool(cur.get("val_legivel")), key=f"leg_{key_prefix}")
+            c2 = st.checkbox("Assinatura confere",
+                             value=bool(cur.get("val_assinatura")), key=f"ass_{key_prefix}")
+            c3 = st.checkbox("Valor confere",
+                             value=bool(cur.get("val_valor")), key=f"val_{key_prefix}")
+            obs = st.text_area("Observação (opcional)", value=cur.get("obs_validacao") or "",
+                               key=f"obs_{key_prefix}", height=90)
+            bok, brej = st.columns(2)
+            if bok.button("✅ Validar", type="primary", use_container_width=True,
+                          key=f"ok_{key_prefix}"):
+                salvar_fn(c1, c2, c3, "validado", obs.strip() or None)
+                st.toast("Documento validado ✅")
+                conn.close()
+                st.rerun()
+            if brej.button("❌ Rejeitar", use_container_width=True, key=f"rej_{key_prefix}"):
+                salvar_fn(c1, c2, c3, "rejeitado", obs.strip() or None)
+                st.toast("Documento rejeitado ❌")
+                conn.close()
+                st.rerun()
+            if cur.get("validado_em"):
+                st.caption(f"Validado em: {cur['validado_em']}")
+
+
 def tela_financeiro(usuario):
     st.header("💰 Financeiro — Validação de documentos")
     st.caption("Confira e valide os documentos enviados pelas OLs, separados por motoboy, "
@@ -2022,56 +2064,46 @@ def tela_financeiro(usuario):
 
     st.divider()
 
-    # ---- Pré-visualização dos arquivos (sem baixar) -----------------------
-    arqs = _arquivos_do_documento(conn, did)
-    col_prev, col_val = st.columns([3, 2])
+    # ---- Documentos do envio: conferência INDEPENDENTE por arquivo --------
+    # Cada arquivo é validado/rejeitado separadamente (ex.: 5 docs, 4 validados
+    # e 1 rejeitado). O status do envio é o resumo dos arquivos.
+    arqs = conn.execute(
+        "SELECT id, nome_arquivo, mime, arquivo, status, val_legivel, val_assinatura, "
+        "val_valor, obs_validacao, validado_em FROM prestacao_arquivos "
+        "WHERE documento_id=? ORDER BY id", (did,)).fetchall()
 
-    with col_prev:
-        st.markdown("#### 📄 Documento(s)")
-        if not arqs:
-            st.warning("Sem arquivo anexado.")
+    if arqs:
+        st.markdown(f"#### 📄 Documentos deste envio ({len(arqs)}) — "
+                    "valide cada um separadamente")
         for i, a in enumerate(arqs):
-            dados = bytes(a["arquivo"])
-            nome = a["nome_arquivo"] or f"arquivo {i + 1}"
-            if len(arqs) > 1:
-                st.markdown(f"**Arquivo {i + 1}/{len(arqs)} — {nome}**")
-            _preview_arquivo(dados, a["mime"], nome, f"{did}_{i}")
-            st.download_button(
-                "📥 Baixar", data=dados, file_name=nome,
-                mime=a["mime"] or "application/octet-stream",
-                key=f"fin_dl_{did}_{i}", use_container_width=True)
+            aid = a["id"]
+            nome = a["nome_arquivo"] or f"documento {i + 1}"
+            cur = {"status": a["status"], "val_legivel": a["val_legivel"],
+                   "val_assinatura": a["val_assinatura"], "val_valor": a["val_valor"],
+                   "obs_validacao": a["obs_validacao"], "validado_em": a["validado_em"]}
 
-    # ---- Checklist de validação -------------------------------------------
-    with col_val:
-        st.markdown("#### ✔️ Conferência")
-        c1 = st.checkbox("Documento legível / completo",
-                         value=bool(doc["val_legivel"]), key=f"fin_leg_{did}")
-        c2 = st.checkbox("Assinatura confere",
-                         value=bool(doc["val_assinatura"]), key=f"fin_ass_{did}")
-        c3 = st.checkbox("Valor confere",
-                         value=bool(doc["val_valor"]), key=f"fin_val_{did}")
-        obs = st.text_area("Observação (opcional)", value=doc["obs_validacao"] or "",
-                           key=f"fin_obs_{did}", height=90)
+            def _salvar(leg, assi, vok, status, obs, _aid=aid):
+                db.validar_arquivo(conn, _aid, leg, assi, vok, status, obs, usuario["id"])
 
-        bok, brej = st.columns(2)
-        if bok.button("✅ Validar", type="primary", use_container_width=True,
-                      key=f"fin_ok_{did}"):
-            db.validar_documento(conn, did, c1, c2, c3, "validado",
-                                 obs.strip() or None, usuario["id"])
-            if idx < n - 1:
-                st.session_state[idx_key] = idx + 1  # já avança para o próximo
-            st.toast("Documento validado ✅")
-            conn.close()
-            st.rerun()
-        if brej.button("❌ Rejeitar", use_container_width=True, key=f"fin_rej_{did}"):
-            db.validar_documento(conn, did, c1, c2, c3, "rejeitado",
-                                 obs.strip() or None, usuario["id"])
-            st.toast("Documento rejeitado ❌")
-            conn.close()
-            st.rerun()
+            _bloco_validacao(conn, bytes(a["arquivo"]), a["mime"], nome, cur,
+                             f"fin_{did}_{aid}", _salvar)
+    else:
+        # Documento legado: 1 arquivo embutido no próprio registro do documento.
+        st.markdown("#### 📄 Documento")
+        leg = conn.execute(
+            "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos "
+            "WHERE id=? AND arquivo IS NOT NULL", (did,)).fetchone()
+        cur = {"status": doc["status"], "val_legivel": doc["val_legivel"],
+               "val_assinatura": doc["val_assinatura"], "val_valor": doc["val_valor"],
+               "obs_validacao": doc["obs_validacao"], "validado_em": doc["validado_em"]}
+        dados = bytes(leg["arquivo"]) if leg else None
+        nome = (leg["nome_arquivo"] if leg else None) or doc["tipo"]
 
-        if doc["validado_em"]:
-            st.caption(f"Última validação: {doc['validado_em']}")
+        def _salvar_doc(leg_, assi, vok, status, obs):
+            db.validar_documento(conn, did, leg_, assi, vok, status, obs, usuario["id"])
+
+        _bloco_validacao(conn, dados, leg["mime"] if leg else None, nome, cur,
+                         f"fin_{did}_leg", _salvar_doc)
 
     conn.close()
 
