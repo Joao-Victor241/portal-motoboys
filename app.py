@@ -1251,6 +1251,38 @@ def tela_admin(usuario):
     st.header("Administração (Grupo Bueno)")
     conn = db.conectar()
 
+    # --- Diagnóstico de persistência (mostra o banco em uso) ---------------
+    # Se estiver no SQLite temporário, os dados (cadastros e links de selfie)
+    # são apagados a cada reinício/redeploy do app — causa do "Link não encontrado".
+    if db.usando_pg():
+        st.success("🟢 Banco: **PostgreSQL (Neon)** — dados salvos de forma permanente.")
+    else:
+        st.error(
+            "🔴 Banco: **SQLite temporário** — os cadastros e os links de selfie "
+            "**são apagados a cada reinício/redeploy do app**. É por isso que o link "
+            "da selfie fica 'não encontrado'. **Solução:** no Streamlit, em "
+            "**Settings → Secrets**, defina `DATABASE_URL` com a string do Neon "
+            "(ex.: `postgresql://usuario:senha@host/banco?sslmode=require`) e reinicie."
+        )
+    _n_links = conn.execute("SELECT COUNT(*) FROM selfie_links").fetchone()[0]
+    _n_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
+    st.caption(f"No banco agora: {_n_mb} motoboy(s) · {_n_links} link(s) de selfie ativo(s).")
+    with st.expander("🔗 Diagnóstico: links de selfie salvos"):
+        _rows = conn.execute(
+            "SELECT sl.token, m.nome, sl.expira_em, sl.usado_em "
+            "FROM selfie_links sl JOIN motoboys m ON m.id=sl.motoboy_id "
+            "ORDER BY sl.expira_em DESC").fetchall()
+        if _rows:
+            st.dataframe(
+                [{"Motoboy": r["nome"],
+                  "Token (final)": "…" + str(r["token"])[-6:],
+                  "Expira": r["expira_em"],
+                  "Usado": (r["usado_em"] or "")[:16] or "—"} for r in _rows],
+                use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhum link de selfie salvo no banco (por isso qualquer link dá "
+                    "'não encontrado'). Gere um novo cadastrando/reenviando o link.")
+
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     tot_cad = conn.execute("SELECT COUNT(*) FROM cadastros").fetchone()[0]
