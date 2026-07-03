@@ -355,6 +355,8 @@ def tela_ol(usuario):
             with st.container(border=True):
                 st.success(f"✅ {_ok['nome']} cadastrado com sucesso!")
                 st.caption("Vá em **Meus motoboys** para ativar em uma loja quando quiser.")
+                if _ok.get("info"):
+                    st.info(f"ℹ️ {_ok['info']}")
                 if _ok.get("aviso"):
                     st.warning(f"Cadastro salvo, mas falha no sistema de acesso "
                                f"({_ok['aviso']}). Será reenviado.")
@@ -548,7 +550,9 @@ def tela_ol(usuario):
                     st.error(e)
                 conn.close(); st.stop()
 
-            # Salva ou atualiza o registro da pessoa.
+            # === 1) PORTAL = fonte da verdade ================================
+            # Salva o cadastro e COMMITA antes de falar com o DMP. Assim, se o DMP
+            # falhar (ex.: CPF já existe lá), o cadastro NUNCA se perde no portal.
             conn.execute(
                 "INSERT INTO motoboys (cpf, nome, nascimento, cnh, cnh_venc, telefone) "
                 "VALUES (?,?,?,?,?,?) "
@@ -570,27 +574,42 @@ def tela_ol(usuario):
                     (motoboy_id, usuario["ol_id"], placa_norm, tipo,
                      str(valido_ate) if valido_ate else None, usuario["id"]))
             except Exception as ex:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 st.error(f"Erro ao salvar cadastro: {ex}")
                 conn.close(); st.stop()
 
-            # Registra no DMP (reconhecimento facial — sem loja).
-            # Para free, a credencial herda a validade (valido_ate); fixo = permanente.
+            link = gerar_link_selfie(conn, motoboy_id)
+            db.auditar(conn, usuario["id"], "cadastro_motoboy", "motoboy", motoboy_id, nome.strip())
+            conn.commit()   # <<< cadastro no portal GARANTIDO aqui
+
+            # === 2) DMP = cópia (best-effort) ================================
+            # Se o CPF já existe no DMP, o cliente VINCULA à pessoa existente.
+            # Qualquer erro aqui NÃO desfaz o cadastro já salvo no portal.
             aviso_dmp = None
+            info_dmp = None
             try:
                 pessoa = dmp.cadastrar_pessoa(
                     cpf=cpf_limpo, nome=nome.strip(),
                     valido_ate=str(valido_ate) if (tipo == "free" and valido_ate) else None)
-                conn.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
-                             (pessoa.get("Id"), motoboy_id))
-                if pessoa.get("credencial_face_ok") is False:
+                if pessoa.get("Id"):
+                    conn.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
+                                 (pessoa.get("Id"), motoboy_id))
+                    conn.commit()
+                if pessoa.get("_ja_existia"):
+                    info_dmp = "Este CPF já existia no DMP — vinculado ao cadastro existente."
+                elif pessoa.get("credencial_face_ok") is False:
                     aviso_dmp = ("pessoa criada, mas a credencial facial falhou: "
                                  + pessoa.get("credencial_face_erro", ""))
             except Exception as erro:
+                try:
+                    conn.rollback()   # limpa estado abortado; não afeta o já commitado
+                except Exception:
+                    pass
                 aviso_dmp = str(erro)
 
-            link = gerar_link_selfie(conn, motoboy_id)
-            db.auditar(conn, usuario["id"], "cadastro_motoboy", "motoboy", motoboy_id, nome.strip())
-            conn.commit()
             # Atualiza o cache de CPFs do DMP para não remover o recém-cadastrado.
             _cpfs_no_dmp_cache.clear()
 
@@ -598,7 +617,7 @@ def tela_ol(usuario):
             # o próximo cadastro, sem apagar nada manualmente.
             st.session_state["_cadastro_ok"] = {
                 "nome": nome.strip(), "link": link,
-                "tel": telefone, "aviso": aviso_dmp,
+                "tel": telefone, "aviso": aviso_dmp, "info": info_dmp,
             }
             # A limpeza dos campos acontece no TOPO do próximo carregamento
             # (antes dos widgets), senão o Streamlit não deixa alterá-los aqui.
@@ -1331,10 +1350,15 @@ def tela_admin(usuario):
             _d = _busca.strip()
             _dig = "".join(filter(str.isdigit, _d))
             _like = "ILIKE" if db.usando_pg() else "LIKE"
-            _mbs = conn.execute(
-                f"SELECT id, nome, cpf, dmp_person_id, treinamento_em, criado_em "
-                f"FROM motoboys WHERE nome {_like} ? OR cpf LIKE ? ORDER BY id DESC",
-                (f"%{_d}%", f"%{_dig}%")).fetchall()
+            _cols = "id, nome, cpf, dmp_person_id, treinamento_em, criado_em"
+            if _dig:
+                _mbs = conn.execute(
+                    f"SELECT {_cols} FROM motoboys WHERE nome {_like} ? OR cpf LIKE ? "
+                    "ORDER BY id DESC", (f"%{_d}%", f"%{_dig}%")).fetchall()
+            else:
+                _mbs = conn.execute(
+                    f"SELECT {_cols} FROM motoboys WHERE nome {_like} ? ORDER BY id DESC",
+                    (f"%{_d}%",)).fetchall()
             if not _mbs:
                 st.warning("Nenhum motoboy com esse nome/CPF no banco. "
                            "Ou seja: o cadastro NÃO está sendo salvo (ou foi apagado).")

@@ -323,11 +323,23 @@ class DMPClient:
         if self.simulado:
             return {"Id": corpo["RegistrationNumber"], "_simulado": True,
                     "credencial_face_ok": True}
+        reg = corpo["RegistrationNumber"]
         resp = self._sessao.post(f"{self.base_url}/api/v1/Person", json=corpo,
                              headers=self._auth(), timeout=30)
-        resp.raise_for_status()
+        if not resp.ok:
+            # Pessoa/matrícula já existe no DMP — em vez de falhar, localiza a
+            # pessoa existente e VINCULA a ela (retorna o registro atual do DMP).
+            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
+                             headers=self._auth(), timeout=30)
+            if g.status_code == 200 and g.json():
+                js = g.json()
+                pessoa = js[0] if isinstance(js, list) else js
+                if isinstance(pessoa, dict):
+                    pessoa = dict(pessoa)
+                    pessoa["_ja_existia"] = True
+                    return pessoa
+            resp.raise_for_status()  # não achou a existente → erro real
         # O POST ecoa o corpo (Id=0). Buscamos o registro para pegar o Id real do DMP.
-        reg = corpo["RegistrationNumber"]
         pessoa = corpo
         g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
                          headers=self._auth(), timeout=30)
