@@ -2498,33 +2498,45 @@ def _etapa_treinamento_video(video, link, token):
         <source src="data:__MIME__;base64,__B64__">
         Seu navegador não suporta a exibição deste vídeo.
       </video>
-      <div id="aviso" style="margin-top:10px;color:#666;font-size:14px;text-align:center">
+      <div id="aviso" style="margin-top:10px;color:#666;font-size:15px;text-align:center">
         ▶️ Assista ao vídeo até o final para liberar a próxima etapa.
       </div>
       <a id="cont" href="__CONT_URL__" target="_top"
+         onclick="try{window.top.location.href='__CONT_URL__';}catch(e){window.location.href='__CONT_URL__';}"
          style="display:none;margin-top:12px;text-align:center;text-decoration:none;
-                background:#137333;color:#fff;padding:16px;border-radius:10px;
-                font-weight:700;font-size:17px">
+                background:#137333;color:#fff;padding:18px;border-radius:10px;
+                font-weight:700;font-size:18px">
         ✅ Vídeo concluído — toque aqui para tirar a foto ▶
       </a>
       <script>
         const v = document.getElementById('vt');
         const cont = document.getElementById('cont');
         const aviso = document.getElementById('aviso');
-        let maxT = 0;
-        v.addEventListener('timeupdate', () => { if (v.currentTime > maxT) maxT = v.currentTime; });
-        v.addEventListener('seeking', () => { if (v.currentTime > maxT + 1.0) v.currentTime = maxT; });
-        v.addEventListener('ended', () => {
+        let maxT = 0, liberado = false;
+        function liberar() {
+          if (liberado) return;
+          liberado = true;
           cont.style.display = 'block';
-          aviso.style.display = 'none';
+          aviso.innerHTML = '✅ Vídeo concluído! Toque no botão verde abaixo.';
+          aviso.style.color = '#137333';
+          try { cont.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) {}
+        }
+        v.addEventListener('timeupdate', () => {
+          if (v.currentTime > maxT) maxT = v.currentTime;
+          // Fallback: libera ao chegar quase no fim (caso 'ended' não dispare).
+          if (v.duration && isFinite(v.duration) && v.currentTime >= v.duration - 0.4) liberar();
         });
+        v.addEventListener('seeking', () => {
+          if (!liberado && v.currentTime > maxT + 1.0) v.currentTime = maxT;
+        });
+        v.addEventListener('ended', liberar);
       </script>
     </div>"""
     # .replace (não % nem .format) para não conflitar com o "100%" nem com as { } do JS.
     html = (html.replace("__MIME__", mime)
                 .replace("__B64__", b64)
                 .replace("__CONT_URL__", cont_url))
-    components.html(html, height=540)
+    components.html(html, height=560, scrolling=True)
 
 
 def tela_selfie():
