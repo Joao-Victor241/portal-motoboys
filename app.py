@@ -922,6 +922,46 @@ def tela_ol(usuario):
             else:
                 st.info("Nenhum motoboy cadastrado ainda. Cadastre na aba **Novo cadastro**.")
         else:
+            # ---- Reenviar/gerar link de cadastro facial (selfie) ------------
+            with st.container(border=True):
+                st.markdown("**📷 Link de cadastro facial (selfie)** — reenvie a qualquer motoboy")
+                _mapa_rb = {f"{r['nome']} — CPF {r['cpf']}": r for r in todos_cad_raw}
+                _sel_rb = st.selectbox("Motoboy", list(_mapa_rb.keys()), key="rb_sel")
+                _mb_rb = _mapa_rb[_sel_rb]
+                b_show, b_new = st.columns(2)
+                if b_show.button("🔗 Mostrar link", key="rb_show", use_container_width=True):
+                    _lk = conn.execute(
+                        "SELECT token FROM selfie_links WHERE motoboy_id=? AND usado_em IS NULL "
+                        "AND expira_em >= ? ORDER BY expira_em DESC LIMIT 1",
+                        (_mb_rb["motoboy_id"], HOJE.isoformat())).fetchone()
+                    if _lk:
+                        _base = os.getenv("PORTAL_BASE_URL", "http://localhost:8501")
+                        _link = f"{_base}/?page=selfie&token={_lk['token']}"
+                    else:
+                        _link = gerar_link_selfie(conn, _mb_rb["motoboy_id"])
+                        conn.commit()
+                    st.session_state["_link_reenvio"] = {
+                        "id": _mb_rb["motoboy_id"], "nome": _mb_rb["nome"],
+                        "link": _link, "tel": _mb_rb["telefone"]}
+                if b_new.button("♻️ Gerar link novo", key="rb_new", use_container_width=True,
+                                help="Invalida os links anteriores e cria um novo."):
+                    conn.execute("DELETE FROM selfie_links WHERE motoboy_id=? AND usado_em IS NULL",
+                                 (_mb_rb["motoboy_id"],))
+                    _link = gerar_link_selfie(conn, _mb_rb["motoboy_id"])
+                    conn.commit()
+                    st.session_state["_link_reenvio"] = {
+                        "id": _mb_rb["motoboy_id"], "nome": _mb_rb["nome"],
+                        "link": _link, "tel": _mb_rb["telefone"]}
+                _lr = st.session_state.get("_link_reenvio")
+                if _lr and _lr["id"] == _mb_rb["motoboy_id"]:
+                    st.code(_lr["link"])
+                    _tel = "".join(filter(str.isdigit, str(_lr["tel"] or "")))
+                    if _tel:
+                        _msg = _montar_msg_wpp(_lr["nome"], _lr["link"])
+                        st.link_button("💬 Enviar pelo WhatsApp",
+                                       f"https://wa.me/55{_tel}?text={urllib.parse.quote(_msg)}",
+                                       type="primary", use_container_width=True)
+
             # ---- Disponíveis para ativar ------------------------------------
             if disponiveis:
                 for r in disponiveis:
@@ -1267,21 +1307,22 @@ def tela_admin(usuario):
     _n_links = conn.execute("SELECT COUNT(*) FROM selfie_links").fetchone()[0]
     _n_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     st.caption(f"No banco agora: {_n_mb} motoboy(s) · {_n_links} link(s) de selfie ativo(s).")
-    with st.expander("🔗 Diagnóstico: links de selfie salvos"):
+    with st.expander("🔗 Links de selfie ATUAIS (copie/teste um destes)"):
+        st.caption("Estes são os links válidos que estão no banco AGORA. Se o link que "
+                   "você tinha não é um destes, ele é antigo — use um daqui.")
         _rows = conn.execute(
             "SELECT sl.token, m.nome, sl.expira_em, sl.usado_em "
             "FROM selfie_links sl JOIN motoboys m ON m.id=sl.motoboy_id "
             "ORDER BY sl.expira_em DESC").fetchall()
         if _rows:
-            st.dataframe(
-                [{"Motoboy": r["nome"],
-                  "Token (final)": "…" + str(r["token"])[-6:],
-                  "Expira": r["expira_em"],
-                  "Usado": (r["usado_em"] or "")[:16] or "—"} for r in _rows],
-                use_container_width=True, hide_index=True)
+            _base = os.getenv("PORTAL_BASE_URL", "http://localhost:8501")
+            for r in _rows:
+                usado = f" · ✅ já usado em {(r['usado_em'] or '')[:16]}" if r["usado_em"] else ""
+                st.markdown(f"**{r['nome']}** — expira {r['expira_em']}{usado}")
+                st.code(f"{_base}/?page=selfie&token={r['token']}", language=None)
         else:
-            st.info("Nenhum link de selfie salvo no banco (por isso qualquer link dá "
-                    "'não encontrado'). Gere um novo cadastrando/reenviando o link.")
+            st.info("Nenhum link de selfie salvo no banco. Gere um novo cadastrando/"
+                    "reenviando o link.")
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
