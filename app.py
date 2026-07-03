@@ -1324,6 +1324,33 @@ def tela_admin(usuario):
             st.info("Nenhum link de selfie salvo no banco. Gere um novo cadastrando/"
                     "reenviando o link.")
 
+    with st.expander("🔎 Investigar um motoboy (raio-x no banco)"):
+        _busca = st.text_input("Nome ou CPF", key="dbg_busca",
+                               placeholder="ex.: Isabela")
+        if _busca.strip():
+            _d = _busca.strip()
+            _dig = "".join(filter(str.isdigit, _d))
+            _like = "ILIKE" if db.usando_pg() else "LIKE"
+            _mbs = conn.execute(
+                f"SELECT id, nome, cpf, dmp_person_id, treinamento_em, criado_em "
+                f"FROM motoboys WHERE nome {_like} ? OR cpf LIKE ? ORDER BY id DESC",
+                (f"%{_d}%", f"%{_dig}%")).fetchall()
+            if not _mbs:
+                st.warning("Nenhum motoboy com esse nome/CPF no banco. "
+                           "Ou seja: o cadastro NÃO está sendo salvo (ou foi apagado).")
+            for _m in _mbs:
+                _ols = [o["ol_id"] for o in conn.execute(
+                    "SELECT ol_id FROM motoboys_ol WHERE motoboy_id=?", (_m["id"],)).fetchall()]
+                _cads = conn.execute(
+                    "SELECT COUNT(*) FROM cadastros WHERE motoboy_id=?", (_m["id"],)).fetchone()[0]
+                _lks = conn.execute(
+                    "SELECT COUNT(*) FROM selfie_links WHERE motoboy_id=?", (_m["id"],)).fetchone()[0]
+                st.markdown(f"**{_m['nome']}** — CPF `{_m['cpf']}` · id {_m['id']}")
+                st.caption(
+                    f"dmp_person_id: {_m['dmp_person_id']} · criado: {_m['criado_em']} · "
+                    f"vínculos OL (motoboys_ol): {_ols or 'NENHUM ⚠️'} · "
+                    f"ativações: {_cads} · links selfie: {_lks}")
+
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     tot_cad = conn.execute("SELECT COUNT(*) FROM cadastros").fetchone()[0]
