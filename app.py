@@ -1040,27 +1040,36 @@ def tela_ol(usuario):
                                         db.auditar(conn, usuario["id"], "ativar_acesso",
                                                    "cadastro", r["motoboy_id"],
                                                    f"{r['nome']} → {loja_sel}")
-                                        # DMP: libera (situação permitido) E cria a
-                                        # credencial FACE — é a credencial que faz a
-                                        # biometria (foto) chegar na leitora física.
-                                        # FIXO = credencial permanente (valido_ate=None);
-                                        # FREE = credencial com validade (auto-remove às
-                                        # 18:30 do valido_ate). Nunca desvincula (o bloqueio
-                                        # é pela situação).
+                                        # DMP — ORDEM IMPORTA para a biometria chegar
+                                        # completa na leitora:
+                                        #   1º) credencial + associação FACE (com a foto
+                                        #       da selfie já no DMP);
+                                        #   2º) SITUAÇÃO permitida POR ÚLTIMO — é ela que
+                                        #       manda a leitora adicionar a biometria já
+                                        #       vinculada à credencial.
+                                        # FIXO = credencial permanente; FREE = com validade.
+                                        # Nunca desvincula (o bloqueio é pela situação).
                                         is_free = r["tipo"] == "free"
                                         val_cred = (str(r["valido_ate"])
                                                     if is_free and r["valido_ate"] else None)
+                                        erro_dmp = None
                                         try:
-                                            dmp.liberar_pessoa(r["cpf"], r["nome"])
                                             dmp.vincular_face(r["cpf"], valido_ate=val_cred)
-                                        except Exception:
+                                            dmp.liberar_pessoa(r["cpf"], r["nome"])
+                                        except Exception as _e1:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
+                                                                     valido_ate=val_cred,
                                                                      liberado=True)
-                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
-                                            except Exception:
-                                                pass
+                                            except Exception as _e2:
+                                                erro_dmp = f"{_e1} / {_e2}"
                                         conn.commit()
+                                        if erro_dmp:
+                                            st.warning("Acesso ativado no portal, mas houve "
+                                                       f"falha ao enviar à leitora: {erro_dmp}. "
+                                                       "Use '🔄 Reenviar para a leitora'.")
+                                        else:
+                                            st.success(f"✅ {r['nome']} ativado e enviado à leitora.")
                                         st.rerun()
             else:
                 st.info("Todos os motoboys cadastrados já estão ativos em alguma loja.")
@@ -1112,8 +1121,10 @@ def tela_ol(usuario):
                             _isfree = r["tipo"] == "free"
                             _valc = str(r["valido_ate"]) if _isfree and r["valido_ate"] else None
                             try:
-                                dmp.liberar_pessoa(r["cpf"], r["nome"])
+                                # 1º credencial + FACE, 2º situação permitida (empurra
+                                # a biometria completa para a leitora).
                                 dmp.vincular_face(r["cpf"], valido_ate=_valc)
+                                dmp.liberar_pessoa(r["cpf"], r["nome"])
                                 st.success(f"✅ Reenviado para a leitora: {r['nome']}.")
                             except Exception as _e:
                                 st.error(f"Falha ao reenviar {r['nome']}: {_e}")

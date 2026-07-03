@@ -326,30 +326,43 @@ class DMPClient:
         reg = corpo["RegistrationNumber"]
         resp = self._sessao.post(f"{self.base_url}/api/v1/Person", json=corpo,
                              headers=self._auth(), timeout=30)
+        ja_existia = False
         if not resp.ok:
             # Pessoa/matrícula já existe no DMP — em vez de falhar, localiza a
-            # pessoa existente e VINCULA a ela (retorna o registro atual do DMP).
+            # pessoa existente e segue (vincula ao cadastro atual).
             g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
                              headers=self._auth(), timeout=30)
             if g.status_code == 200 and g.json():
                 js = g.json()
                 pessoa = js[0] if isinstance(js, list) else js
-                if isinstance(pessoa, dict):
-                    pessoa = dict(pessoa)
-                    pessoa["_ja_existia"] = True
-                    return pessoa
-            resp.raise_for_status()  # não achou a existente → erro real
-        # O POST ecoa o corpo (Id=0). Buscamos o registro para pegar o Id real do DMP.
-        pessoa = corpo
-        g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
-                         headers=self._auth(), timeout=30)
-        if g.status_code == 200 and g.json():
-            js = g.json()
-            pessoa = js[0] if isinstance(js, list) else js
-        # NÃO cria credencial no cadastro. O acesso é controlado pela SITUAÇÃO
-        # (permitido/bloqueado), que manda os comandos de adicionar/retirar a
-        # biometria na leitora. A credencial é criada só para motoboy FREE, na
-        # ativação, para limitar a validade (auto-remoção no vencimento).
+                ja_existia = True
+            else:
+                resp.raise_for_status()   # não achou a existente → erro real
+                pessoa = corpo
+        else:
+            # O POST ecoa o corpo (Id=0). Buscamos o registro p/ pegar o Id real.
+            pessoa = corpo
+            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{reg}",
+                             headers=self._auth(), timeout=30)
+            if g.status_code == 200 and g.json():
+                js = g.json()
+                pessoa = js[0] if isinstance(js, list) else js
+
+        pessoa = dict(pessoa) if isinstance(pessoa, dict) else dict(corpo)
+        pessoa["_ja_existia"] = ja_existia
+
+        # CRIA a credencial e ASSOCIA ao FACE já no cadastro (idempotente).
+        # FIXO = credencial permanente; FREE = com validade (valido_ate 18:30).
+        # A leitora só reconhece de fato quando a SITUAÇÃO virar permitida (na
+        # ativação) E a foto (selfie) existir. Best-effort: erro aqui não impede
+        # o cadastro da pessoa (o portal é a fonte da verdade).
+        if com_credencial_face:
+            try:
+                self.vincular_face(cpf, valido_ate=valido_ate)
+                pessoa["credencial_face_ok"] = True
+            except Exception as e:
+                pessoa["credencial_face_ok"] = False
+                pessoa["credencial_face_erro"] = str(e)
         return pessoa
 
     def atualizar_foto(self, cpf, nome, foto_bytes: bytes) -> dict:
