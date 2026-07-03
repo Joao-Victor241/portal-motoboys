@@ -2489,7 +2489,7 @@ def _etapa_treinamento_video(video, link, token):
       <video id="vt" width="100%" playsinline controls
              controlsList="nodownload noplaybackrate noremoteplayback"
              disablepictureinpicture style="border-radius:10px;background:#000">
-        <source src="data:%s;base64,%s">
+        <source src="data:__MIME__;base64,__B64__">
         Seu navegador não suporta a exibição deste vídeo.
       </video>
       <div id="fim" style="display:none;margin-top:10px;padding:10px;border-radius:8px;
@@ -2503,7 +2503,9 @@ def _etapa_treinamento_video(video, link, token):
         v.addEventListener('seeking', () => { if (v.currentTime > maxT + 1.0) v.currentTime = maxT; });
         v.addEventListener('ended', () => { document.getElementById('fim').style.display = 'block'; });
       </script>
-    </div>""" % (mime, b64)
+    </div>"""
+    # .replace (não % nem .format) para não conflitar com o "100%" nem com as { } do JS.
+    html = html.replace("__MIME__", mime).replace("__B64__", b64)
     components.html(html, height=460)
 
     st.markdown("---")
