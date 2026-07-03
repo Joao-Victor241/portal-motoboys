@@ -2478,12 +2478,18 @@ def _etapa_treinamento_video(video, link, token):
     st.markdown(f"### Olá, **{link['nome']}**!")
     st.markdown(
         "Antes de cadastrar sua foto, **assista ao vídeo de treinamento** abaixo. "
-        "O vídeo não pode ser adiantado — deixe rodar até o fim."
+        "O vídeo **não pode ser adiantado** e o botão para continuar **só aparece "
+        "quando o vídeo terminar**."
     )
 
     dados = bytes(video["dados"])
     mime = video["mime"] or "video/mp4"
     b64 = base64.b64encode(dados).decode()
+    base = os.getenv("PORTAL_BASE_URL", "http://localhost:8501")
+    cont_url = f"{base}/?page=selfie&token={token}&tv=ok"
+    # Não há caixinha de "confirmo": o botão de continuar só é revelado no evento
+    # 'ended' (fim do vídeo). Como o avanço é bloqueado, chegar ao fim exige
+    # assistir tudo. O link navega a aba (target=_top) para a etapa da foto.
     html = """
     <div style="font-family:sans-serif">
       <video id="vt" width="100%" playsinline controls
@@ -2492,33 +2498,33 @@ def _etapa_treinamento_video(video, link, token):
         <source src="data:__MIME__;base64,__B64__">
         Seu navegador não suporta a exibição deste vídeo.
       </video>
-      <div id="fim" style="display:none;margin-top:10px;padding:10px;border-radius:8px;
-           background:#e6f4ea;color:#137333;font-weight:600;text-align:center">
-        ✅ Vídeo concluído! Role para baixo, confirme e continue para a foto.
+      <div id="aviso" style="margin-top:10px;color:#666;font-size:14px;text-align:center">
+        ▶️ Assista ao vídeo até o final para liberar a próxima etapa.
       </div>
+      <a id="cont" href="__CONT_URL__" target="_top"
+         style="display:none;margin-top:12px;text-align:center;text-decoration:none;
+                background:#137333;color:#fff;padding:16px;border-radius:10px;
+                font-weight:700;font-size:17px">
+        ✅ Vídeo concluído — toque aqui para tirar a foto ▶
+      </a>
       <script>
         const v = document.getElementById('vt');
+        const cont = document.getElementById('cont');
+        const aviso = document.getElementById('aviso');
         let maxT = 0;
         v.addEventListener('timeupdate', () => { if (v.currentTime > maxT) maxT = v.currentTime; });
         v.addEventListener('seeking', () => { if (v.currentTime > maxT + 1.0) v.currentTime = maxT; });
-        v.addEventListener('ended', () => { document.getElementById('fim').style.display = 'block'; });
+        v.addEventListener('ended', () => {
+          cont.style.display = 'block';
+          aviso.style.display = 'none';
+        });
       </script>
     </div>"""
     # .replace (não % nem .format) para não conflitar com o "100%" nem com as { } do JS.
-    html = html.replace("__MIME__", mime).replace("__B64__", b64)
-    components.html(html, height=460)
-
-    st.markdown("---")
-    ok = st.checkbox("Confirmo que assisti ao vídeo de treinamento completo.",
-                     key=f"trein_chk_{token}")
-    if st.button("Continuar para a foto ▶", type="primary", disabled=not ok):
-        conn = db.conectar()
-        try:
-            db.marcar_treinamento_visto(conn, link["motoboy_id"])
-        finally:
-            conn.close()
-        st.session_state[f"trein_ok_{token}"] = True
-        st.rerun()
+    html = (html.replace("__MIME__", mime)
+                .replace("__B64__", b64)
+                .replace("__CONT_URL__", cont_url))
+    components.html(html, height=540)
 
 
 def tela_selfie():
@@ -2573,7 +2579,17 @@ def tela_selfie():
         video = db.get_video_treinamento(conn_v)
     finally:
         conn_v.close()
-    ja_assistiu = bool(link["treinamento_em"]) or st.session_state.get(f"trein_ok_{token}")
+    # O botão "continuar" só aparece quando o vídeo TERMINA (evento 'ended') e o
+    # vídeo não pode ser adiantado — então chegar aqui com tv=ok significa que
+    # assistiu até o fim. Registra no banco (persiste em qualquer aba/sessão).
+    veio_do_video = st.query_params.get("tv") == "ok"
+    if veio_do_video and not link["treinamento_em"]:
+        conn_m = db.conectar()
+        try:
+            db.marcar_treinamento_visto(conn_m, link["motoboy_id"])
+        finally:
+            conn_m.close()
+    ja_assistiu = bool(link["treinamento_em"]) or veio_do_video
     if video and not ja_assistiu:
         _etapa_treinamento_video(video, link, token)
         st.stop()
