@@ -116,43 +116,67 @@ def _cpfs_no_dmp_cache():
         return None
 
 
-def _sincronizar_exclusoes_dmp():
-    """
-    Remove do portal os motoboys que foram EXCLUÍDOS no DMP — assim, apagar
-    no DMP reflete no Streamlit.
+def _identificadores_motoboy(m):
+    """Formas pelas quais o motoboy pode aparecer na lista do DMP — casamos por
+    QUALQUER uma delas, para não apagar por engano por diferença de formato:
+      - ID do DMP (exato, o mais confiável);
+      - CPF só dígitos, sem zero à esquerda, e com 11 dígitos (zfill)."""
+    formas = set()
+    if m["dmp_person_id"] is not None:
+        try:
+            formas.add("pid:" + str(int(m["dmp_person_id"])))
+        except Exception:
+            pass
+    d = "".join(filter(str.isdigit, str(m["cpf"])))
+    if d:
+        formas.update({d, d.lstrip("0"), d.zfill(11)})
+    return formas
 
-    Segurança contra remoção indevida:
-      - só age se a leitura do DMP teve sucesso e retornou pessoas;
-      - só remove quem já foi enviado ao DMP (dmp_person_id setado);
-      - só remove cadastros com mais de 2 min (evita apagar recém-criado
-        antes do cache do DMP atualizar).
+
+def _sincronizar_exclusoes_dmp(cap_seguranca=10):
+    """
+    Remove do portal os motoboys EXCLUÍDOS no DMP (apagar no DMP reflete aqui).
+    Hoje é MANUAL (botão do admin) — a versão automática foi desligada porque
+    podia apagar cadastro recém-criado por diferença de formato de CPF.
+
+    Segurança reforçada:
+      - só remove quem NÃO bate por ID do DMP NEM por CPF (com/sem zero à esquerda);
+      - só remove quem tem dmp_person_id e foi criado há mais de 15 min;
+      - se de uma vez apareceriam muitas remoções (> cap_seguranca), NÃO apaga
+        nada (leitura do DMP provavelmente veio incompleta) e sinaliza.
+    Devolve dict {removidos, ausentes, bloqueado, leitura_falhou}.
     """
     ids = _cpfs_no_dmp_cache()
     if not ids:
-        return
+        return {"removidos": [], "ausentes": 0, "bloqueado": False, "leitura_falhou": True}
     conn = db.conectar()
     try:
-        # "há mais de 2 min" — sintaxe difere entre PostgreSQL e SQLite.
-        corte = ("to_char(now() - interval '2 minutes', 'YYYY-MM-DD HH24:MI:SS')"
-                 if db.usando_pg() else "datetime('now', '-2 minutes')")
+        # "há mais de 15 min" — sintaxe difere entre PostgreSQL e SQLite.
+        corte = ("to_char(now() - interval '15 minutes', 'YYYY-MM-DD HH24:MI:SS')"
+                 if db.usando_pg() else "datetime('now', '-15 minutes')")
         candidatos = conn.execute(
-            "SELECT id, cpf, nome FROM motoboys "
+            "SELECT id, cpf, nome, dmp_person_id FROM motoboys "
             "WHERE dmp_person_id IS NOT NULL "
             f"AND criado_em < {corte}"
         ).fetchall()
+        ausentes = [m for m in candidatos if not (_identificadores_motoboy(m) & ids)]
+        if len(ausentes) > cap_seguranca:
+            # Muitas remoções de uma vez → quase certo que a leitura veio incompleta.
+            return {"removidos": [], "ausentes": len(ausentes),
+                    "bloqueado": True, "leitura_falhou": False}
         removidos = []
-        for m in candidatos:
-            cpf_digitos = "".join(filter(str.isdigit, str(m["cpf"])))
-            if cpf_digitos and cpf_digitos not in ids:
-                conn.execute("DELETE FROM cadastros WHERE motoboy_id=?", (m["id"],))
-                conn.execute("DELETE FROM motoboys_ol WHERE motoboy_id=?", (m["id"],))
-                conn.execute("DELETE FROM selfie_links WHERE motoboy_id=?", (m["id"],))
-                conn.execute("DELETE FROM motoboys WHERE id=?", (m["id"],))
-                db.auditar(conn, None, "exclusao_sincronizada_dmp", "motoboy",
-                           m["id"], f"{m['nome']} — removido (excluído no DMP)")
-                removidos.append(m["nome"])
+        for m in ausentes:
+            conn.execute("DELETE FROM cadastros WHERE motoboy_id=?", (m["id"],))
+            conn.execute("DELETE FROM motoboys_ol WHERE motoboy_id=?", (m["id"],))
+            conn.execute("DELETE FROM selfie_links WHERE motoboy_id=?", (m["id"],))
+            conn.execute("DELETE FROM motoboys WHERE id=?", (m["id"],))
+            db.auditar(conn, None, "exclusao_sincronizada_dmp", "motoboy",
+                       m["id"], f"{m['nome']} — removido (excluído no DMP)")
+            removidos.append(m["nome"])
         if removidos:
             conn.commit()
+        return {"removidos": removidos, "ausentes": len(ausentes),
+                "bloqueado": False, "leitura_falhou": False}
     finally:
         conn.close()
 
@@ -1284,24 +1308,25 @@ def tela_admin(usuario):
         st.divider()
         st.caption(
             "**Sincronizar exclusões:** remove do portal os motoboys que foram "
-            "apagados no DMP. Roda sozinho a cada minuto; use o botão para forçar agora."
+            "apagados no DMP. É **manual** (não roda mais sozinho, para não apagar "
+            "cadastro por engano). Use o botão só depois de excluir alguém no DMP."
         )
         if st.button("🔄 Sincronizar exclusões do DMP agora"):
             _cpfs_no_dmp_cache.clear()
-            ids = _cpfs_no_dmp_cache()
-            if not ids:
+            res = _sincronizar_exclusoes_dmp(cap_seguranca=50)
+            if res["leitura_falhou"]:
                 st.warning("Não consegui ler a lista do DMP agora (ou está simulado). "
                            "Nada foi removido.")
+            elif res["bloqueado"]:
+                st.error(f"⚠️ Segurança: a comparação indicou {res['ausentes']} remoções "
+                         "de uma vez — isso parece leitura incompleta do DMP, então "
+                         "**nada foi removido**. Tente novamente em instantes.")
+            elif res["removidos"]:
+                st.success(f"✅ {len(res['removidos'])} removido(s): "
+                           + ", ".join(res["removidos"]))
+                st.rerun()
             else:
-                antes = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
-                _sincronizar_exclusoes_dmp()
-                depois = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
-                n = antes - depois
-                if n > 0:
-                    st.success(f"✅ {n} motoboy(s) removido(s) do portal (excluídos no DMP).")
-                    st.rerun()
-                else:
-                    st.info("Nada para remover — portal e DMP já estão sincronizados.")
+                st.info("Nada para remover — portal e DMP já estão sincronizados.")
 
     aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest, aba_trein = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
@@ -2486,13 +2511,15 @@ def main():
         tela_selfie()
         return
 
-    # Tarefas de fundo (suspender free vencidos + sincronizar exclusões do DMP):
-    # rodam no máximo 1x por minuto, não a cada clique — deixa o app muito mais ágil.
+    # Tarefas de fundo (roda no máximo 1x por minuto, não a cada clique).
+    # ATENÇÃO: a exclusão automática de motoboys "sumidos do DMP" foi DESLIGADA —
+    # o casamento por CPF podia falhar (paginação/zero à esquerda) e apagar por
+    # engano um motoboy recém-cadastrado (incluindo o link da selfie). A sincronização
+    # de exclusões agora é só MANUAL, pelo botão no painel admin.
     import time as _time
     if _time.time() - st.session_state.get("_ultimo_bg", 0) > 60:
         st.session_state["_ultimo_bg"] = _time.time()
         _desativar_free_vencidos()
-        _sincronizar_exclusoes_dmp()
 
     if "usuario" not in st.session_state:
         tela_login()

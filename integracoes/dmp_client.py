@@ -398,9 +398,19 @@ class DMPClient:
                 break
             for p in pessoas:
                 if p.get("Cpf"):
-                    ids.add("".join(filter(str.isdigit, str(p["Cpf"]))))
+                    d = "".join(filter(str.isdigit, str(p["Cpf"])))
+                    if d:
+                        ids.add(d)
+                        ids.add(d.lstrip("0"))  # casa mesmo se o outro lado perdeu o zero
                 if p.get("RegistrationNumber"):
                     ids.add(str(int(p["RegistrationNumber"])))
+                # ID da pessoa no DMP — casamento exato com motoboys.dmp_person_id
+                pid = p.get("Id", p.get("id"))
+                if pid is not None:
+                    try:
+                        ids.add("pid:" + str(int(pid)))
+                    except Exception:
+                        pass
             if len(pessoas) < 200:
                 break
             page += 1
