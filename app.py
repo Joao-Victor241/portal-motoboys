@@ -1040,23 +1040,24 @@ def tela_ol(usuario):
                                         db.auditar(conn, usuario["id"], "ativar_acesso",
                                                    "cadastro", r["motoboy_id"],
                                                    f"{r['nome']} → {loja_sel}")
-                                        # DMP: a SITUAÇÃO permitido manda a leitora
-                                        # adicionar a biometria. Para FREE, cria também
-                                        # a credencial com validade (auto-remove às 18:30
-                                        # do valido_ate). Fixo = só situação.
+                                        # DMP: libera (situação permitido) E cria a
+                                        # credencial FACE — é a credencial que faz a
+                                        # biometria (foto) chegar na leitora física.
+                                        # FIXO = credencial permanente (valido_ate=None);
+                                        # FREE = credencial com validade (auto-remove às
+                                        # 18:30 do valido_ate). Nunca desvincula (o bloqueio
+                                        # é pela situação).
                                         is_free = r["tipo"] == "free"
                                         val_cred = (str(r["valido_ate"])
                                                     if is_free and r["valido_ate"] else None)
                                         try:
                                             dmp.liberar_pessoa(r["cpf"], r["nome"])
-                                            if is_free:
-                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
+                                            dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                         except Exception:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
                                                                      liberado=True)
-                                                if is_free:
-                                                    dmp.vincular_face(r["cpf"], valido_ate=val_cred)
+                                                dmp.vincular_face(r["cpf"], valido_ate=val_cred)
                                             except Exception:
                                                 pass
                                         conn.commit()
@@ -1100,6 +1101,22 @@ def tela_ol(usuario):
                                     pass
                                 conn.commit()
                                 st.rerun()
+
+                        # Reenvia a biometria (foto) para as catracas — cria a
+                        # credencial FACE (fixo=permanente, free=com validade). Útil
+                        # para quem foi ativado antes desta correção e não subiu à leitora.
+                        if st.button("🔄 Reenviar para a leitora",
+                                     key=f"resync_{r['motoboy_id']}",
+                                     help="Reenvia a foto/biometria às catracas (cria a credencial).",
+                                     use_container_width=True):
+                            _isfree = r["tipo"] == "free"
+                            _valc = str(r["valido_ate"]) if _isfree and r["valido_ate"] else None
+                            try:
+                                dmp.liberar_pessoa(r["cpf"], r["nome"])
+                                dmp.vincular_face(r["cpf"], valido_ate=_valc)
+                                st.success(f"✅ Reenviado para a leitora: {r['nome']}.")
+                            except Exception as _e:
+                                st.error(f"Falha ao reenviar {r['nome']}: {_e}")
 
         # ---- Reenvio de link de selfie --------------------------------------
         if todos_cad_raw:
