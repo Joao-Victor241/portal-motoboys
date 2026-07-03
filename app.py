@@ -1052,13 +1052,18 @@ def tela_ol(usuario):
                                         is_free = r["tipo"] == "free"
                                         val_cred = (str(r["valido_ate"])
                                                     if is_free and r["valido_ate"] else None)
+                                        foto_mb = db.get_foto_selfie(conn, r["motoboy_id"])
                                         erro_dmp = None
                                         try:
                                             dmp.vincular_face(r["cpf"], valido_ate=val_cred)
-                                            dmp.liberar_pessoa(r["cpf"], r["nome"])
+                                            # situação permitida COM a foto → leva a
+                                            # biometria (template) junto à leitora.
+                                            dmp.liberar_pessoa(r["cpf"], r["nome"],
+                                                               foto_bytes=foto_mb)
                                         except Exception as _e1:
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
+                                                                     foto_bytes=foto_mb,
                                                                      valido_ate=val_cred,
                                                                      liberado=True)
                                             except Exception as _e2:
@@ -1066,10 +1071,13 @@ def tela_ol(usuario):
                                         conn.commit()
                                         if erro_dmp:
                                             st.warning("Acesso ativado no portal, mas houve "
-                                                       f"falha ao enviar à leitora: {erro_dmp}. "
-                                                       "Use '🔄 Reenviar para a leitora'.")
+                                                       f"falha ao enviar à leitora: {erro_dmp}.")
                                         else:
-                                            st.success(f"✅ {r['nome']} ativado e enviado à leitora.")
+                                            aviso_foto = "" if foto_mb else (
+                                                " (obs: a selfie ainda não foi enviada — "
+                                                "a biometria sobe quando o motoboy tirar a foto)")
+                                            st.success(f"✅ {r['nome']} ativado e enviado "
+                                                       f"à leitora.{aviso_foto}")
                                         st.rerun()
             else:
                 st.info("Todos os motoboys cadastrados já estão ativos em alguma loja.")
@@ -1110,24 +1118,6 @@ def tela_ol(usuario):
                                     pass
                                 conn.commit()
                                 st.rerun()
-
-                        # Reenvia a biometria (foto) para as catracas — cria a
-                        # credencial FACE (fixo=permanente, free=com validade). Útil
-                        # para quem foi ativado antes desta correção e não subiu à leitora.
-                        if st.button("🔄 Reenviar para a leitora",
-                                     key=f"resync_{r['motoboy_id']}",
-                                     help="Reenvia a foto/biometria às catracas (cria a credencial).",
-                                     use_container_width=True):
-                            _isfree = r["tipo"] == "free"
-                            _valc = str(r["valido_ate"]) if _isfree and r["valido_ate"] else None
-                            try:
-                                # 1º credencial + FACE, 2º situação permitida (empurra
-                                # a biometria completa para a leitora).
-                                dmp.vincular_face(r["cpf"], valido_ate=_valc)
-                                dmp.liberar_pessoa(r["cpf"], r["nome"])
-                                st.success(f"✅ Reenviado para a leitora: {r['nome']}.")
-                            except Exception as _e:
-                                st.error(f"Falha ao reenviar {r['nome']}: {_e}")
 
         # ---- Reenvio de link de selfie --------------------------------------
         if todos_cad_raw:
@@ -2755,6 +2745,9 @@ def tela_selfie():
                             "UPDATE motoboys SET foto_path=? WHERE cpf=?",
                             (f"dmp_upload:{token}", cpf)
                         )
+                        # Guarda a selfie no banco para reenviá-la ao DMP junto com
+                        # a situação na ativação (é o que leva a biometria à leitora).
+                        db.salvar_foto_selfie(conn2, link["motoboy_id"], foto_bytes)
                         db.auditar(conn2, None, "selfie_enviada", "motoboy",
                                    link["motoboy_id"],
                                    f"{nome} — foto enviada ao DMP")

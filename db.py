@@ -694,11 +694,27 @@ def _garantir_treinamento(conn):
         f" despachado_em TEXT)")
     if pg:
         conn.execute("ALTER TABLE motoboys ADD COLUMN IF NOT EXISTS treinamento_em TEXT")
+        conn.execute(f"ALTER TABLE motoboys ADD COLUMN IF NOT EXISTS foto_selfie {blob}")
     else:
-        try:
-            conn.execute("ALTER TABLE motoboys ADD COLUMN treinamento_em TEXT")
-        except Exception:
-            pass
+        for _c in ("treinamento_em TEXT", f"foto_selfie {blob}"):
+            try:
+                conn.execute(f"ALTER TABLE motoboys ADD COLUMN {_c}")
+            except Exception:
+                pass
+
+
+def salvar_foto_selfie(conn, motoboy_id, foto_bytes):
+    """Guarda a selfie no banco (para reenviar ao DMP junto com a situação na ativação)."""
+    conn.execute("UPDATE motoboys SET foto_selfie=? WHERE id=?", (foto_bytes, motoboy_id))
+    conn.commit()
+
+
+def get_foto_selfie(conn, motoboy_id):
+    """Bytes da selfie guardada (ou None)."""
+    r = conn.execute("SELECT foto_selfie FROM motoboys WHERE id=?", (motoboy_id,)).fetchone()
+    if r and r[0] is not None:
+        return bytes(r[0])
+    return None
 
 
 # ---- Fila FIFO de expedição (painel do operador) --------------------------

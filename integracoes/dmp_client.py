@@ -381,15 +381,35 @@ class DMPClient:
         resp.raise_for_status()
         return {"ok": True}
 
-    def liberar_pessoa(self, cpf, nome) -> dict:
-        """PUT /api/v1/Person com PersonSituation = ACESSO PERMITIDO (10). Usa na reativação."""
-        corpo = self._montar_pessoa(cpf, nome, None, None, self.situ_permitido)
+    def _foto_atual(self, cpf):
+        """Lê a Photo (base64) que já está no DMP (None se não houver/retornar)."""
+        try:
+            numero = int("".join(filter(str.isdigit, str(cpf))))
+            g = self._sessao.get(f"{self.base_url}/api/v1/Person/{numero}",
+                                 headers=self._auth(), timeout=30)
+            if g.status_code == 200 and g.json():
+                js = g.json()
+                p = js[0] if isinstance(js, list) else js
+                return p.get("Photo")
+        except Exception:
+            pass
+        return None
+
+    def liberar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None) -> dict:
+        """PUT /api/v1/Person com PersonSituation = ACESSO PERMITIDO (10).
+        Inclui a FOTO no MESMO PUT para a leitora receber a BIOMETRIA (template
+        facial) junto com a credencial ao mudar a situação — sem isso a credencial
+        chega mas a foto não. foto_bytes = selfie guardada no portal; se não vier,
+        reaproveita a foto que já está no DMP."""
         if self.simulado:
             return {"_simulado": True, "situacao": self.situ_permitido}
+        foto_b64 = (base64.b64encode(foto_bytes).decode()
+                    if foto_bytes else self._foto_atual(cpf))
+        corpo = self._montar_pessoa(cpf, nome, foto_b64, None, self.situ_permitido)
         resp = self._sessao.put(f"{self.base_url}/api/v1/Person", json=corpo,
                             headers=self._auth(), timeout=30)
         resp.raise_for_status()
-        return {"ok": True}
+        return {"ok": True, "com_foto": foto_b64 is not None}
 
     def bloquear_pessoa(self, cpf, nome) -> dict:
         """PUT /api/v1/Person com PersonSituation = ACESSO BLOQUEADO (11)."""
