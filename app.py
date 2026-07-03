@@ -551,39 +551,51 @@ def tela_ol(usuario):
                 conn.close(); st.stop()
 
             # === 1) PORTAL = fonte da verdade ================================
-            # Salva o cadastro e COMMITA antes de falar com o DMP. Assim, se o DMP
-            # falhar (ex.: CPF já existe lá), o cadastro NUNCA se perde no portal.
-            conn.execute(
-                "INSERT INTO motoboys (cpf, nome, nascimento, cnh, cnh_venc, telefone) "
-                "VALUES (?,?,?,?,?,?) "
-                "ON CONFLICT (cpf) DO UPDATE SET nome=excluded.nome, nascimento=excluded.nascimento, "
-                "cnh=excluded.cnh, cnh_venc=excluded.cnh_venc, "
-                "telefone=excluded.telefone",
-                (cpf_limpo, nome.strip(), str(nascimento), cnh.strip(),
-                 str(cnh_venc), telefone.strip()))
-            motoboy_id = conn.execute(
-                "SELECT id FROM motoboys WHERE cpf=?", (cpf_limpo,)).fetchone()["id"]
-
-            # Vínculo OL → motoboy (sem loja). Já existindo, atualiza placa/tipo/valido_ate.
+            # Grava numa conexão DEDICADA e nova (isolada da conexão da página, que
+            # no PostgreSQL pode ter ficado com a transação abortada por algo antes
+            # — nesse caso o commit vira rollback SILENCIOSO e o cadastro se perdia).
+            conn_w = db.conectar()
             try:
-                conn.execute(
+                conn_w.execute(
+                    "INSERT INTO motoboys (cpf, nome, nascimento, cnh, cnh_venc, telefone) "
+                    "VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT (cpf) DO UPDATE SET nome=excluded.nome, nascimento=excluded.nascimento, "
+                    "cnh=excluded.cnh, cnh_venc=excluded.cnh_venc, telefone=excluded.telefone",
+                    (cpf_limpo, nome.strip(), str(nascimento), cnh.strip(),
+                     str(cnh_venc), telefone.strip()))
+                motoboy_id = conn_w.execute(
+                    "SELECT id FROM motoboys WHERE cpf=?", (cpf_limpo,)).fetchone()["id"]
+                conn_w.execute(
                     "INSERT INTO motoboys_ol (motoboy_id, ol_id, placa, tipo, valido_ate, criado_por) "
                     "VALUES (?,?,?,?,?,?) "
                     "ON CONFLICT (motoboy_id, ol_id) DO UPDATE SET "
                     "placa=excluded.placa, tipo=excluded.tipo, valido_ate=excluded.valido_ate",
                     (motoboy_id, usuario["ol_id"], placa_norm, tipo,
                      str(valido_ate) if valido_ate else None, usuario["id"]))
+                link = gerar_link_selfie(conn_w, motoboy_id)
+                db.auditar(conn_w, usuario["id"], "cadastro_motoboy", "motoboy",
+                           motoboy_id, nome.strip())
+                conn_w.commit()
             except Exception as ex:
                 try:
-                    conn.rollback()
+                    conn_w.rollback()
                 except Exception:
                     pass
-                st.error(f"Erro ao salvar cadastro: {ex}")
-                conn.close(); st.stop()
+                conn_w.close(); conn.close()
+                st.error(f"Erro ao salvar o cadastro no banco: {ex}")
+                st.stop()
 
-            link = gerar_link_selfie(conn, motoboy_id)
-            db.auditar(conn, usuario["id"], "cadastro_motoboy", "motoboy", motoboy_id, nome.strip())
-            conn.commit()   # <<< cadastro no portal GARANTIDO aqui
+            # Confirma a gravação relendo em conexão nova. Se não confirmar, NÃO
+            # mostramos sucesso — evita o caso "aparece ok mas não salvou".
+            conn_chk = db.conectar()
+            gravou = conn_chk.execute(
+                "SELECT 1 FROM motoboys WHERE cpf=?", (cpf_limpo,)).fetchone()
+            conn_chk.close()
+            if not gravou:
+                conn_w.close(); conn.close()
+                st.error("O cadastro não foi confirmado no banco — tente novamente. "
+                         "Se persistir, pode ser instabilidade do banco (Neon).")
+                st.stop()
 
             # === 2) DMP = cópia (best-effort) ================================
             # Se o CPF já existe no DMP, o cliente VINCULA à pessoa existente.
@@ -595,9 +607,9 @@ def tela_ol(usuario):
                     cpf=cpf_limpo, nome=nome.strip(),
                     valido_ate=str(valido_ate) if (tipo == "free" and valido_ate) else None)
                 if pessoa.get("Id"):
-                    conn.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
-                                 (pessoa.get("Id"), motoboy_id))
-                    conn.commit()
+                    conn_w.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
+                                   (pessoa.get("Id"), motoboy_id))
+                    conn_w.commit()
                 if pessoa.get("_ja_existia"):
                     info_dmp = "Este CPF já existia no DMP — vinculado ao cadastro existente."
                 elif pessoa.get("credencial_face_ok") is False:
@@ -605,10 +617,11 @@ def tela_ol(usuario):
                                  + pessoa.get("credencial_face_erro", ""))
             except Exception as erro:
                 try:
-                    conn.rollback()   # limpa estado abortado; não afeta o já commitado
+                    conn_w.rollback()
                 except Exception:
                     pass
                 aviso_dmp = str(erro)
+            conn_w.close()
 
             # Atualiza o cache de CPFs do DMP para não remover o recém-cadastrado.
             _cpfs_no_dmp_cache.clear()
