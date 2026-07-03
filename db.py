@@ -675,8 +675,8 @@ def _inserir_id(conn, sql, params):
 
 
 def _garantir_treinamento(conn):
-    """Cria a tabela do vídeo de treinamento e a coluna motoboys.treinamento_em
-    (idempotente). Chamado no inicializar, nos dois bancos."""
+    """Cria tabelas de runtime (vídeo de treinamento, fila de expedição) e a
+    coluna motoboys.treinamento_em (idempotente). Chamado no inicializar, nos 2 bancos."""
     pg = usando_pg()
     serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     blob = "BYTEA" if pg else "BLOB"
@@ -685,6 +685,13 @@ def _garantir_treinamento(conn):
         f"CREATE TABLE IF NOT EXISTS treinamento_video ("
         f" id {serial}, nome_arquivo TEXT, mime TEXT, dados {blob},"
         f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    # Fila FIFO de expedição do operador (chegada do motoboy à expedição).
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS fila_expedicao ("
+        f" id {serial}, loja_id INTEGER NOT NULL REFERENCES lojas(id),"
+        f" motoboy_id INTEGER NOT NULL REFERENCES motoboys(id),"
+        f" chegada_em TEXT NOT NULL, situacao TEXT NOT NULL DEFAULT 'aguardando',"
+        f" despachado_em TEXT)")
     if pg:
         conn.execute("ALTER TABLE motoboys ADD COLUMN IF NOT EXISTS treinamento_em TEXT")
     else:
@@ -692,6 +699,55 @@ def _garantir_treinamento(conn):
             conn.execute("ALTER TABLE motoboys ADD COLUMN treinamento_em TEXT")
         except Exception:
             pass
+
+
+# ---- Fila FIFO de expedição (painel do operador) --------------------------
+
+def registrar_chegada(conn, loja_id, motoboy_id) -> bool:
+    """Coloca o motoboy na fila de expedição da loja (ordem = hora de chegada).
+    Não duplica: se já está aguardando nesta loja, devolve False."""
+    ja = conn.execute(
+        "SELECT id FROM fila_expedicao WHERE loja_id=? AND motoboy_id=? AND situacao='aguardando'",
+        (loja_id, motoboy_id)).fetchone()
+    if ja:
+        return False
+    conn.execute(
+        "INSERT INTO fila_expedicao (loja_id, motoboy_id, chegada_em, situacao) "
+        "VALUES (?,?,?, 'aguardando')", (loja_id, motoboy_id, _agora_br()))
+    conn.commit()
+    return True
+
+
+def fila_aguardando(conn, loja_id):
+    """Fila FIFO (quem chegou primeiro vem primeiro)."""
+    return conn.execute(
+        "SELECT f.id, f.motoboy_id, f.chegada_em, m.nome, m.cpf, "
+        "(SELECT placa FROM motoboys_ol WHERE motoboy_id=f.motoboy_id LIMIT 1) AS placa "
+        "FROM fila_expedicao f JOIN motoboys m ON m.id=f.motoboy_id "
+        "WHERE f.loja_id=? AND f.situacao='aguardando' "
+        "ORDER BY f.chegada_em ASC, f.id ASC", (loja_id,)).fetchall()
+
+
+def despachar_fila(conn, fila_id):
+    """Libera a entrega (tira da fila, marcando como despachado)."""
+    conn.execute("UPDATE fila_expedicao SET situacao='despachado', despachado_em=? WHERE id=?",
+                 (_agora_br(), fila_id))
+    conn.commit()
+
+
+def remover_fila(conn, fila_id):
+    """Remove o motoboy da fila sem despachar (ex.: saiu, engano)."""
+    conn.execute("DELETE FROM fila_expedicao WHERE id=?", (fila_id,))
+    conn.commit()
+
+
+def despachados_recentes(conn, loja_id, limite=10):
+    """Últimas entregas liberadas nesta loja (histórico curto)."""
+    return conn.execute(
+        "SELECT m.nome, f.chegada_em, f.despachado_em FROM fila_expedicao f "
+        "JOIN motoboys m ON m.id=f.motoboy_id "
+        "WHERE f.loja_id=? AND f.situacao='despachado' "
+        "ORDER BY f.despachado_em DESC LIMIT ?", (loja_id, limite)).fetchall()
 
 
 def salvar_video_treinamento(conn, nome, mime, dados):

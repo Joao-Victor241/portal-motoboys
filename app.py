@@ -2387,7 +2387,7 @@ def tela_operador(usuario):
     )
 
     liberados = conn.execute(
-        "SELECT m.nome, m.cpf, o.nome AS ol, mol.placa, mol.tipo, "
+        "SELECT m.id AS motoboy_id, m.nome, m.cpf, o.nome AS ol, mol.placa, mol.tipo, "
         "       CASE WHEN m.foto_path IS NOT NULL THEN 'Sim' ELSE 'NÃO' END AS facial "
         "FROM cadastros c "
         "JOIN motoboys m   ON m.id = c.motoboy_id "
@@ -2418,7 +2418,83 @@ def tela_operador(usuario):
     st.divider()
 
     # =======================================================================
-    # 2) FILA / ÚLTIMOS ACESSOS (depende do AccessLog do DMP)
+    # 2) FILA FIFO DE EXPEDIÇÃO — ordem de chegada (testável já)
+    # =======================================================================
+    st.subheader("🔁 Fila de expedição (FIFO)")
+    st.caption(
+        "Quando o motoboy passa no reconhecimento facial e entra na expedição, "
+        "registre a chegada abaixo. As entregas são liberadas na **ordem de chegada**."
+    )
+
+    # Registrar chegada (check-in) de um motoboy liberado nesta loja.
+    opcoes_ch = {f"{r['nome']} — {r['placa'] or 's/placa'}": r for r in liberados}
+    if opcoes_ch:
+        ch1, ch2 = st.columns([3, 1])
+        with ch1:
+            sel_ch = st.selectbox("Motoboy que chegou à expedição",
+                                  list(opcoes_ch.keys()), key="fila_chegou",
+                                  label_visibility="collapsed")
+        with ch2:
+            if st.button("✅ Registrar chegada", type="primary", use_container_width=True):
+                rc = opcoes_ch[sel_ch]
+                if db.registrar_chegada(conn, loja_id, rc["motoboy_id"]):
+                    st.toast(f"Chegada registrada: {rc['nome']}")
+                else:
+                    st.toast("Esse motoboy já está na fila.")
+                st.rerun()
+    else:
+        st.info("Nenhum motoboy liberado nesta loja para entrar na fila.")
+
+    from datetime import timezone as _tz
+    _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)
+
+    def _espera_min(ch):
+        try:
+            c = datetime.strptime(str(ch)[:19], "%Y-%m-%d %H:%M:%S")
+            return max(0, int((_agora_br.replace(tzinfo=None) - c).total_seconds() // 60))
+        except Exception:
+            return None
+
+    fila = db.fila_aguardando(conn, loja_id)
+    if not fila:
+        st.info("Fila vazia — ninguém aguardando expedição nesta loja.")
+    else:
+        st.markdown(f"**{len(fila)} na fila** (o 1º é o próximo a sair):")
+        for pos, f in enumerate(fila, start=1):
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([1, 4, 2])
+                with c1:
+                    st.markdown(f"## {pos}º")
+                with c2:
+                    prox = "  🟢 **PRÓXIMO**" if pos == 1 else ""
+                    st.markdown(f"**{f['nome']}**{prox}")
+                    hora = str(f["chegada_em"])[11:16]
+                    esp = _espera_min(f["chegada_em"])
+                    espera_txt = f" · esperando há {esp} min" if esp is not None else ""
+                    st.caption(f"🏍️ {f['placa'] or '—'} · chegou às {hora}{espera_txt}")
+                with c3:
+                    if st.button("🚚 Liberar entrega", key=f"desp_{f['id']}",
+                                 type=("primary" if pos == 1 else "secondary"),
+                                 use_container_width=True):
+                        db.despachar_fila(conn, f["id"])
+                        st.rerun()
+                    if st.button("✖️ Tirar da fila", key=f"rem_{f['id']}",
+                                 use_container_width=True):
+                        db.remover_fila(conn, f["id"])
+                        st.rerun()
+
+    desp = db.despachados_recentes(conn, loja_id, 10)
+    if desp:
+        with st.expander("📋 Últimas entregas liberadas"):
+            st.dataframe(
+                [{"Motoboy": d["nome"], "Chegou": str(d["chegada_em"])[11:16],
+                  "Liberado às": str(d["despachado_em"] or "")[11:16]} for d in desp],
+                use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # =======================================================================
+    # 3) MOVIMENTAÇÃO NA CATRACA (automático — depende do AccessLog do DMP)
     # =======================================================================
     st.subheader("🛵 Movimentação na catraca")
 
