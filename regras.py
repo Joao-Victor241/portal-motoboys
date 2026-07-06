@@ -18,7 +18,13 @@ Rotina automática de vencimento:
     chegou ao horário de corte (18:30). Chamada em cada carregamento do app.
 """
 
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timezone, timedelta
+
+
+def _agora_br() -> datetime:
+    """Horário de Brasília (UTC-3). Na nuvem o relógio é UTC, então convertemos —
+    senão o corte das 18:30 dispararia às 15:30 no horário local."""
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).replace(tzinfo=None)
 
 
 def _para_data(valor) -> date | None:
@@ -149,7 +155,7 @@ def buscar_free_vencidos(conn) -> list:
     Cada item da lista é um dict com: cadastro_id, motoboy_id, cpf, nome, valido_ate.
     A função só identifica — quem suspende o acesso no DMP é o chamador (app.py).
     """
-    agora = datetime.now()
+    agora = _agora_br()          # horário de Brasília (não UTC da nuvem)
     hoje = agora.date()
     passou_corte = agora.time() >= HORARIO_CORTE
 

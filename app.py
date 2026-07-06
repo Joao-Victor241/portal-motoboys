@@ -65,6 +65,52 @@ if st.query_params.get("page") == "selfie":
 else:
     st.set_page_config(page_title="Portal de Motoboys", page_icon="🛵", layout="wide")
 
+
+def _aplicar_estilo():
+    """Estilo visual global — deixa o portal mais limpo, elegante e profissional.
+    Injetado uma vez por carregamento (CSS inline, sem depender de arquivos)."""
+    st.markdown(
+        """
+        <style>
+          /* Tipografia e respiro geral */
+          html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+          .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
+          h1, h2, h3 { letter-spacing: -0.01em; font-weight: 700; }
+          h1 { font-size: 1.9rem; }
+          /* Botões arredondados e com peso */
+          .stButton > button, .stLinkButton > a, .stDownloadButton > button {
+            border-radius: 10px; font-weight: 600; padding: 0.5rem 1rem;
+            transition: transform .05s ease, box-shadow .2s ease;
+          }
+          .stButton > button:hover, .stLinkButton > a:hover { transform: translateY(-1px); }
+          /* Botão primário com verde do Grupo Bueno */
+          .stButton > button[kind="primary"], .stLinkButton > a[kind="primary"] {
+            background: #137333; border-color: #137333;
+          }
+          /* Cartões (st.container border=True) com sombra suave */
+          div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 14px; box-shadow: 0 1px 3px rgba(16,24,40,.06);
+          }
+          /* Métricas em destaque */
+          div[data-testid="stMetric"] {
+            background: #f8fafc; border: 1px solid #eef2f6; border-radius: 12px;
+            padding: 12px 14px;
+          }
+          div[data-testid="stMetricValue"] { font-weight: 700; }
+          /* Abas mais limpas */
+          button[data-baseweb="tab"] { font-weight: 600; }
+          /* Inputs com cantos suaves */
+          .stTextInput input, .stDateInput input, .stSelectbox div[data-baseweb="select"] {
+            border-radius: 10px;
+          }
+          /* Sidebar com leve separação */
+          section[data-testid="stSidebar"] { border-right: 1px solid #eef2f6; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 HOJE = date.today()
 
 
@@ -346,20 +392,19 @@ def tela_ol(usuario):
                        "c_nasc", "c_cnhvenc", "c_tipo", "c_validoate", "cnh_upload"):
                 st.session_state.pop(_k, None)
 
-        st.markdown("### Cadastrar novo motoboy")
-
-        # Confirmação do último cadastro — fica visível mesmo após o formulário
-        # ser limpo, para a OL enviar o link e já iniciar outro cadastro.
+        # Confirmação do último cadastro. Quando presente, mostramos SÓ a
+        # confirmação + link + botão "novo motoboy" — o formulário fica oculto
+        # para não misturar com os dados do cadastro anterior.
         _ok = st.session_state.get("_cadastro_ok")
         if _ok:
+            st.markdown("### ✅ Motoboy cadastrado")
             with st.container(border=True):
-                st.success(f"✅ {_ok['nome']} cadastrado com sucesso!")
-                st.caption("Vá em **Meus motoboys** para ativar em uma loja quando quiser.")
+                st.success(f"**{_ok['nome']}** cadastrado com sucesso!")
                 if _ok.get("info"):
                     st.info(f"ℹ️ {_ok['info']}")
                 if _ok.get("aviso"):
-                    st.warning(f"Cadastro salvo, mas falha no sistema de acesso "
-                               f"({_ok['aviso']}). Será reenviado.")
+                    st.warning("Cadastro salvo, mas houve um aviso no sistema de "
+                               f"acesso ({_ok['aviso']}).")
                 st.markdown("**📲 Link de cadastro facial** — envie ao motoboy:")
                 st.code(_ok["link"])
                 tel_ok = "".join(filter(str.isdigit, _ok.get("tel") or ""))
@@ -368,12 +413,16 @@ def tela_ol(usuario):
                     st.link_button(
                         "💬 Enviar pelo WhatsApp",
                         f"https://wa.me/55{tel_ok}?text={urllib.parse.quote(msg_ok)}",
-                        type="primary", use_container_width=True)
-                if st.button("✖️ Ocultar mensagem", key="ocultar_cad_ok"):
-                    del st.session_state["_cadastro_ok"]
-                    st.rerun()
-            st.caption("👇 Formulário limpo — pronto para o próximo cadastro.")
+                        use_container_width=True)
+                st.caption("Depois, ative o motoboy numa loja em **Meus motoboys**.")
+            if st.button("➕ Cadastrar novo motoboy", type="primary",
+                         use_container_width=True, key="novo_cadastro_btn"):
+                del st.session_state["_cadastro_ok"]
+                st.session_state["_limpar_form"] = True
+                st.rerun()
+            st.divider()
 
+        st.markdown("### Cadastrar novo motoboy")
         st.caption("Todos os campos são obrigatórios.")
 
         with st.expander("📷 Preencher automaticamente com foto da CNH"):
@@ -2818,8 +2867,11 @@ def tela_selfie():
 def main():
     # Rota pública: selfie (antes de qualquer verificação de login)
     if st.query_params.get("page") == "selfie":
+        _aplicar_estilo()
         tela_selfie()
         return
+
+    _aplicar_estilo()
 
     # Tarefas de fundo (roda no máximo 1x por minuto, não a cada clique).
     # ATENÇÃO: a exclusão automática de motoboys "sumidos do DMP" foi DESLIGADA —
