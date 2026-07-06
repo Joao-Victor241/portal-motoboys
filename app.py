@@ -652,9 +652,11 @@ def tela_ol(usuario):
             aviso_dmp = None
             info_dmp = None
             try:
-                pessoa = dmp.cadastrar_pessoa(
-                    cpf=cpf_limpo, nome=nome.strip(),
-                    valido_ate=str(valido_ate) if (tipo == "free" and valido_ate) else None)
+                # Credencial FACE IGUAL para fixo e free: permanente. O limite de
+                # data/horário do FREE é aplicado pelo PORTAL (muda a situação para
+                # bloqueado às 18:30 do valido_ate), não pela validade da credencial
+                # — a credencial temporária criava de forma diferente e falhava.
+                pessoa = dmp.cadastrar_pessoa(cpf=cpf_limpo, nome=nome.strip())
                 if pessoa.get("Id"):
                     conn_w.execute("UPDATE motoboys SET dmp_person_id=? WHERE id=?",
                                    (pessoa.get("Id"), motoboy_id))
@@ -841,20 +843,10 @@ def tela_ol(usuario):
                                "motoboy", mb["motoboy_id"], mb["nome"])
                     conn.commit()
 
-                    # Só FREE usa credencial (para limitar a validade). Ao mudar a
-                    # data, atualiza a validade; se estiver com acesso ativo, revincula
-                    # com o novo prazo para reprogramar a auto-remoção na leitora.
-                    if ed_tipo == "free" and ed_valido_ate:
-                        try:
-                            nova_validade = str(ed_valido_ate)
-                            dmp.garantir_credencial(mb["cpf"], valido_ate=nova_validade)
-                            cad_ativo = conn.execute(
-                                "SELECT 1 FROM cadastros WHERE motoboy_id=? AND situacao='ativo' LIMIT 1",
-                                (mb["motoboy_id"],)).fetchone()
-                            if cad_ativo:
-                                dmp.vincular_face(mb["cpf"], valido_ate=nova_validade)
-                        except Exception:
-                            pass  # não impede a edição local
+                    # A data do FREE (valido_ate) fica só no portal (motoboys_ol,
+                    # já atualizada acima). O corte às 18:30 é aplicado pelo portal
+                    # mudando a situação — a credencial no DMP é permanente e não
+                    # é alterada aqui (evita a credencial temporária que falhava).
 
                     # Limpa o estado do OCR deste motoboy
                     st.session_state.pop("ed_ocr_venc", None)
@@ -1098,13 +1090,13 @@ def tela_ol(usuario):
                                         #       vinculada à credencial.
                                         # FIXO = credencial permanente; FREE = com validade.
                                         # Nunca desvincula (o bloqueio é pela situação).
-                                        is_free = r["tipo"] == "free"
-                                        val_cred = (str(r["valido_ate"])
-                                                    if is_free and r["valido_ate"] else None)
+                                        # Credencial permanente para TODOS (fixo e free).
+                                        # O corte do free (18:30) é feito pelo portal
+                                        # via situação, não pela validade da credencial.
                                         foto_mb = db.get_foto_selfie(conn, r["motoboy_id"])
                                         erro_dmp = None
                                         try:
-                                            dmp.vincular_face(r["cpf"], valido_ate=val_cred)
+                                            dmp.vincular_face(r["cpf"], valido_ate=None)
                                             # situação permitida COM a foto → leva a
                                             # biometria (template) junto à leitora.
                                             dmp.liberar_pessoa(r["cpf"], r["nome"],
@@ -1113,7 +1105,6 @@ def tela_ol(usuario):
                                             try:
                                                 dmp.cadastrar_pessoa(r["cpf"], r["nome"],
                                                                      foto_bytes=foto_mb,
-                                                                     valido_ate=val_cred,
                                                                      liberado=True)
                                             except Exception as _e2:
                                                 erro_dmp = f"{_e1} / {_e2}"
