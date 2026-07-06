@@ -385,12 +385,12 @@ def tela_ol(usuario):
         sub_novo, sub_editar = st.tabs(["➕ Novo", "✏️ Editar cadastro"])
 
     with sub_novo:
-        # Limpa o formulário (ANTES de criar os widgets) quando o último cadastro
-        # pediu — assim os campos ficam vazios prontos para o próximo motoboy.
+        # Limpeza CONFIÁVEL do formulário: em vez de apagar as chaves (o Streamlit
+        # às vezes mantém o valor antigo do widget), trocamos a "versão" do form —
+        # as chaves mudam e o Streamlit cria widgets NOVOS e vazios.
         if st.session_state.pop("_limpar_form", False):
-            for _k in ("c_nome", "c_cpf", "c_tel", "c_cnh", "c_placa",
-                       "c_nasc", "c_cnhvenc", "c_tipo", "c_validoate", "cnh_upload"):
-                st.session_state.pop(_k, None)
+            st.session_state["form_ver"] = st.session_state.get("form_ver", 0) + 1
+        _v = st.session_state.get("form_ver", 0)
 
         # Confirmação do último cadastro. Quando presente, mostramos SÓ a
         # confirmação + link + botão "novo motoboy" — o formulário fica oculto
@@ -427,17 +427,17 @@ def tela_ol(usuario):
 
         with st.expander("📷 Preencher automaticamente com foto da CNH"):
             foto_cnh = st.file_uploader("Envie a foto da CNH",
-                                        type=["jpg", "jpeg", "png"], key="cnh_upload")
+                                        type=["jpg", "jpeg", "png"], key=f"cnh_upload_{_v}")
             if foto_cnh is not None and st.button("Ler CNH e preencher campos"):
                 with st.spinner("Lendo a CNH com IA..."):
                     try:
                         from integracoes.cnh_ocr import ler_cnh
                         d = ler_cnh(foto_cnh.getvalue(), foto_cnh.type or "image/jpeg")
-                        st.session_state["c_nome"] = d.get("nome") or ""
-                        st.session_state["c_cpf"] = limpar_cpf(d.get("cpf") or "")
-                        st.session_state["c_cnh"] = d.get("registro") or ""
-                        st.session_state["c_nasc"] = _data(d.get("nascimento"))
-                        st.session_state["c_cnhvenc"] = _data(d.get("validade"))
+                        st.session_state[f"c_nome_{_v}"] = d.get("nome") or ""
+                        st.session_state[f"c_cpf_{_v}"] = limpar_cpf(d.get("cpf") or "")
+                        st.session_state[f"c_cnh_{_v}"] = d.get("registro") or ""
+                        st.session_state[f"c_nasc_{_v}"] = _data(d.get("nascimento"))
+                        st.session_state[f"c_cnhvenc_{_v}"] = _data(d.get("validade"))
                         st.success("CNH lida! Confira os campos abaixo antes de cadastrar.")
                     except Exception as e:
                         st.error(f"Não foi possível ler a CNH ({e}). Preencha manualmente.")
@@ -449,10 +449,10 @@ def tela_ol(usuario):
         col1, col2, col3 = st.columns(3, gap="medium")
 
         with col1:
-            nome = st.text_input("Nome completo", key="c_nome", placeholder="Ex: João da Silva")
+            nome = st.text_input("Nome completo", key=f"c_nome_{_v}", placeholder="Ex: João da Silva")
 
         with col2:
-            cpf = st.text_input("CPF", key="c_cpf", placeholder="000.000.000-00")
+            cpf = st.text_input("CPF", key=f"c_cpf_{_v}", placeholder="000.000.000-00")
             cpf_ok = False
             if cpf:
                 ok, msg = validar_cpf(cpf)
@@ -471,10 +471,10 @@ def tela_ol(usuario):
                         st.success("CPF válido ✓")
 
         with col3:
-            st.session_state.setdefault("c_nasc", None)
+            st.session_state.setdefault(f"c_nasc_{_v}", None)
             nascimento = st.date_input(
                 "Data de nascimento (maior de 18 anos)",
-                key="c_nasc",
+                key=f"c_nasc_{_v}",
                 format="DD/MM/YYYY",
                 min_value=date(1950, 1, 1),
                 max_value=MAX_NASC,
@@ -483,7 +483,7 @@ def tela_ol(usuario):
 
         # ---- Linha 2: contato -----------------------------------------------
         st.markdown("**Contato** — usado para enviar o link de cadastro facial")
-        telefone = st.text_input("WhatsApp (com DDD)", key="c_tel",
+        telefone = st.text_input("WhatsApp (com DDD)", key=f"c_tel_{_v}",
                                  placeholder="61999990000")
 
         st.divider()
@@ -493,13 +493,13 @@ def tela_ol(usuario):
         col6, col7, col8 = st.columns(3, gap="medium")
 
         with col6:
-            cnh = st.text_input("Número da CNH", key="c_cnh", placeholder="Ex: 12345678900")
+            cnh = st.text_input("Número da CNH", key=f"c_cnh_{_v}", placeholder="Ex: 12345678900")
 
         with col7:
-            st.session_state.setdefault("c_cnhvenc", None)
+            st.session_state.setdefault(f"c_cnhvenc_{_v}", None)
             cnh_venc = st.date_input(
                 "Vencimento da CNH",
-                key="c_cnhvenc",
+                key=f"c_cnhvenc_{_v}",
                 format="DD/MM/YYYY",
                 min_value=date(2000, 1, 1),
                 max_value=date(2100, 1, 1),
@@ -508,7 +508,7 @@ def tela_ol(usuario):
                 st.error(f"CNH vencida em {cnh_venc.strftime('%d/%m/%Y')}.")
 
         with col8:
-            placa = st.text_input("Placa da moto", key="c_placa", placeholder="ABC1D23")
+            placa = st.text_input("Placa da moto", key=f"c_placa_{_v}", placeholder="ABC1D23")
             placa_norm = ""
             if placa:
                 ok, res = validar_placa(placa)
@@ -530,17 +530,17 @@ def tela_ol(usuario):
                 "Tipo de vínculo",
                 ["fixo", "free"],
                 horizontal=True,
-                key="c_tipo",
+                key=f"c_tipo_{_v}",
                 help="**Fixo:** permanente, sem prazo de saída.\n\n"
                      "**Free:** temporário, com data de encerramento obrigatória.",
             )
 
         with col10:
             if tipo == "free":
-                st.session_state.setdefault("c_validoate", None)
+                st.session_state.setdefault(f"c_validoate_{_v}", None)
                 valido_ate = st.date_input(
                     "Válido até",
-                    key="c_validoate",
+                    key=f"c_validoate_{_v}",
                     format="DD/MM/YYYY",
                     min_value=HOJE,
                     max_value=date(2100, 1, 1),
