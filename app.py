@@ -1476,6 +1476,35 @@ def tela_admin(usuario):
                     db.remover_senha_loja(conn, _lj["id"])
                     st.rerun()
 
+    with st.expander("🔧 Corrigir credencial no DMP (criar/vincular a face)"):
+        st.caption("Cria a credencial **permanente** e vincula a face no DMP para um "
+                   "motoboy que não recebeu (ex.: cadastros antigos). Se ele estiver "
+                   "com acesso ATIVO, já reenvia a foto para a leitora.")
+        _mbs2 = conn.execute("SELECT id, nome, cpf FROM motoboys ORDER BY nome").fetchall()
+        if not _mbs2:
+            st.info("Nenhum motoboy cadastrado.")
+        else:
+            _map2 = {f"{m['nome']} — CPF {m['cpf']}": m for m in _mbs2}
+            _sel2 = st.selectbox("Motoboy", list(_map2.keys()), key="fix_cred_sel")
+            _m2 = _map2[_sel2]
+            if st.button("🔧 Criar credencial e vincular", key="fix_cred_btn",
+                         type="primary"):
+                try:
+                    dmp.vincular_face(_m2["cpf"], valido_ate=None)
+                    _ativo = conn.execute(
+                        "SELECT 1 FROM cadastros WHERE motoboy_id=? AND situacao='ativo' LIMIT 1",
+                        (_m2["id"],)).fetchone()
+                    if _ativo:
+                        _foto = db.get_foto_selfie(conn, _m2["id"])
+                        dmp.liberar_pessoa(_m2["cpf"], _m2["nome"], foto_bytes=_foto)
+                        st.success(f"✅ Credencial criada e biometria enviada à leitora "
+                                   f"({_m2['nome']}).")
+                    else:
+                        st.success(f"✅ Credencial criada e vinculada ({_m2['nome']}). "
+                                   "Ative-o numa loja para a foto subir à leitora.")
+                except Exception as _e:
+                    st.error(f"Falha no DMP: {_e}")
+
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     tot_cad = conn.execute("SELECT COUNT(*) FROM cadastros").fetchone()[0]
