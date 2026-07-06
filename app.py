@@ -1487,8 +1487,9 @@ def tela_admin(usuario):
             _map2 = {f"{m['nome']} — CPF {m['cpf']}": m for m in _mbs2}
             _sel2 = st.selectbox("Motoboy", list(_map2.keys()), key="fix_cred_sel")
             _m2 = _map2[_sel2]
-            if st.button("🔧 Criar credencial e vincular", key="fix_cred_btn",
-                         type="primary"):
+            bfix, bdiag = st.columns(2)
+            if bfix.button("🔧 Criar credencial e vincular", key="fix_cred_btn",
+                           type="primary", use_container_width=True):
                 try:
                     dmp.vincular_face(_m2["cpf"], valido_ate=None)
                     _ativo = conn.execute(
@@ -1504,6 +1505,18 @@ def tela_admin(usuario):
                                    "Ative-o numa loja para a foto subir à leitora.")
                 except Exception as _e:
                     st.error(f"Falha no DMP: {_e}")
+            if bdiag.button("🔎 Diagnosticar (ver resposta do DMP)", key="diag_cred_btn",
+                            use_container_width=True):
+                try:
+                    diag = dmp.diagnostico_credencial(_m2["cpf"])
+                    st.write(f"**Número da credencial:** {diag.get('numero')} · "
+                             f"**PersonId:** {diag.get('person_id')}")
+                    for p in diag.get("passos", []):
+                        st.markdown(f"- **{p['passo']}** → status `{p['status']}`")
+                        if p.get("resposta"):
+                            st.code(p["resposta"], language=None)
+                except Exception as _e:
+                    st.error(f"Erro no diagnóstico: {_e}")
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]

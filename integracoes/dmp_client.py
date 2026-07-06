@@ -302,6 +302,55 @@ class DMPClient:
     def criar_credencial_face(self, cpf, person_id=None, valido_ate=None, **_) -> dict:
         return self.vincular_face(cpf, person_id=person_id, valido_ate=valido_ate)
 
+    def diagnostico_credencial(self, cpf) -> dict:
+        """Roda os passos de credencial + associação FACE reportando o STATUS e o
+        CORPO de cada resposta do DMP — para ver por que a biometria não sobe
+        (ex.: número de credencial 'queimado'/já associado a outra pessoa)."""
+        numero = int("".join(filter(str.isdigit, str(cpf))))
+        if self.simulado:
+            return {"simulado": True, "numero": numero, "passos": []}
+        passos = []
+
+        def _rec(nome, resp):
+            corpo = ""
+            try:
+                corpo = (resp.text or "")[:400]
+            except Exception:
+                pass
+            passos.append({"passo": nome,
+                           "status": getattr(resp, "status_code", "?"),
+                           "resposta": corpo})
+
+        # 1) Cria/atualiza a credencial permanente.
+        corpo_cred = self._corpo_credencial(numero, None, ativa=True)
+        r = self._sessao.post(f"{self.base_url}/api/v1/Credential", json=corpo_cred,
+                              headers=self._auth(), timeout=30)
+        _rec("POST /Credential (criar)", r)
+        if r.status_code in (400, 409):
+            r2 = self._sessao.put(f"{self.base_url}/api/v1/Credential/{numero}",
+                                  json=corpo_cred, headers=self._auth(), timeout=30)
+            _rec("PUT /Credential (atualizar)", r2)
+
+        # 2) Id da pessoa.
+        pid = self._person_id(numero)
+        passos.append({"passo": "person_id", "status": "ok" if pid else "NAO ACHOU",
+                       "resposta": str(pid)})
+
+        # 3) Associações existentes.
+        if pid:
+            a = self._sessao.get(f"{self.base_url}/api/v1/PersonCredential/{pid}",
+                                 headers=self._auth(), timeout=30)
+            _rec("GET /PersonCredential (existentes)", a)
+            # 4) Tenta associar a face.
+            corpo_assoc = {"PersonId": pid, "CredentialNumber": numero,
+                           "InitialDate": _agora_br_iso(), "FinalDate": None,
+                           "ForREPUse": False, "ForFaceUse": True}
+            r3 = self._sessao.post(f"{self.base_url}/api/v1/PersonCredential/Association",
+                                   json=corpo_assoc, headers=self._auth(), timeout=30)
+            _rec("POST /PersonCredential/Association (vincular face)", r3)
+
+        return {"numero": numero, "person_id": pid, "passos": passos}
+
     def cadastrar_pessoa(self, cpf, nome, foto_bytes: bytes | None = None,
                          telefone: str | None = None,
                          com_credencial_face: bool = True,
