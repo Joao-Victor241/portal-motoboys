@@ -1406,6 +1406,36 @@ def tela_admin(usuario):
                     f"vínculos OL (motoboys_ol): {_ols or 'NENHUM ⚠️'} · "
                     f"ativações: {_cads} · links selfie: {_lks}")
 
+    with st.expander("🔑 Senha de acesso do operador (por loja)"):
+        st.caption("Um único perfil **operador** acessa todas as unidades, mas precisa "
+                   "da **senha da unidade** para ver os dados dela. Defina aqui.")
+        _lojas_adm = conn.execute(
+            "SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
+        for _lj in _lojas_adm:
+            _tem = db.tem_senha_loja(conn, _lj["id"])
+            cA, cB, cC = st.columns([3, 3, 2])
+            with cA:
+                st.markdown(f"**{_lj['nome']}**")
+                st.caption("🔒 senha definida" if _tem else "⚠️ sem senha (acesso livre)")
+            with cB:
+                _nova = st.text_input("Nova senha", type="password",
+                                      key=f"adm_senha_{_lj['id']}",
+                                      label_visibility="collapsed",
+                                      placeholder="definir/alterar senha")
+            with cC:
+                if st.button("Salvar", key=f"adm_setsenha_{_lj['id']}",
+                             use_container_width=True):
+                    if _nova.strip():
+                        db.set_senha_loja(conn, _lj["id"], _nova.strip())
+                        st.success(f"Senha definida para {_lj['nome']}.")
+                        st.rerun()
+                    else:
+                        st.error("Digite uma senha.")
+                if _tem and st.button("Remover", key=f"adm_delsenha_{_lj['id']}",
+                                      use_container_width=True):
+                    db.remover_senha_loja(conn, _lj["id"])
+                    st.rerun()
+
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     tot_cad = conn.execute("SELECT COUNT(*) FROM cadastros").fetchone()[0]
@@ -2353,40 +2383,58 @@ def tela_financeiro(usuario):
 # ===========================================================================
 
 def tela_operador(usuario):
-    st.header("Operação da unidade")
-
     conn = db.conectar()
+    db.garantir_tabelas_prestacao(conn)     # garante a tabela de configurações (senhas)
 
-    # --- Operador escolhe em qual loja está operando -----------------------
+    LIMITE_ALERTA = 4   # avisa quando as motos disponíveis chegam a este número
+
     lojas = conn.execute(
         "SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
     if not lojas:
+        st.header("Operação da unidade")
         st.warning("Nenhuma loja cadastrada.")
         conn.close()
         return
-
     mapa = {l["nome"]: l["id"] for l in lojas}
-    loja_nome = st.selectbox("Loja / unidade", list(mapa.keys()), key="op_loja")
-    loja_id = mapa[loja_nome]
 
-    col_a, col_b = st.columns([3, 1])
-    with col_b:
-        if st.button("🔄 Atualizar", use_container_width=True):
-            st.rerun()
+    # ---- Barra lateral: escolher unidade + senha de acesso ----------------
+    with st.sidebar:
+        st.divider()
+        st.markdown("### 🏪 Unidade")
+        loja_nome = st.selectbox("Loja / unidade", list(mapa.keys()), key="op_loja")
+        loja_id = mapa[loja_nome]
+        chave_ok = f"op_ok_{loja_id}"
 
-    st.divider()
+        if st.session_state.get(chave_ok):
+            st.success(f"Acesso liberado:\n**{loja_nome}**")
+            if st.button("🔒 Sair desta unidade", use_container_width=True):
+                st.session_state.pop(chave_ok, None)
+                st.rerun()
+        elif not db.tem_senha_loja(conn, loja_id):
+            # Ainda sem senha configurada → libera, mas avisa (admin deve definir).
+            st.session_state[chave_ok] = True
+            st.info("Unidade sem senha ainda. Peça ao admin para definir em "
+                    "Administração → 🔑 Senha de acesso do operador.")
+        else:
+            senha_in = st.text_input("Senha da unidade", type="password",
+                                     key=f"op_senha_in_{loja_id}")
+            if st.button("Entrar", type="primary", use_container_width=True):
+                if db.verificar_senha_loja(conn, loja_id, senha_in):
+                    st.session_state[chave_ok] = True
+                    st.rerun()
+                else:
+                    st.error("Senha incorreta.")
 
-    # =======================================================================
-    # 1) MOTOBOYS LIBERADOS NESTA LOJA AGORA (dado real, sem depender do
-    #    AccessLog). É o que vale para conferir no teste da catraca: quem
-    #    passar pelo reconhecimento facial tem que estar nesta lista.
-    # =======================================================================
-    st.subheader("✅ Motoboys liberados nesta loja agora")
-    st.caption(
-        "Estes são os motoboys com acesso ATIVO aqui — o reconhecimento facial "
-        "da catraca deve liberar apenas estas pessoas."
-    )
+    # Bloqueia a área principal enquanto a unidade não estiver liberada.
+    if not st.session_state.get(f"op_ok_{loja_id}"):
+        st.header("Operação da unidade")
+        st.info("👈 Escolha a unidade e informe a **senha** na barra lateral para acessar.")
+        conn.close()
+        return
 
+    # ---- Dados da unidade -------------------------------------------------
+    fila = db.fila_aguardando(conn, loja_id)
+    n_disp = len(fila)
     liberados = conn.execute(
         "SELECT m.id AS motoboy_id, m.nome, m.cpf, o.nome AS ol, mol.placa, mol.tipo, "
         "       CASE WHEN m.foto_path IS NOT NULL THEN 'Sim' ELSE 'NÃO' END AS facial "
@@ -2395,39 +2443,31 @@ def tela_operador(usuario):
         "JOIN motoboys_ol mol ON mol.motoboy_id = c.motoboy_id AND mol.ol_id = c.ol_id "
         "JOIN ols o        ON o.id = c.ol_id "
         "WHERE c.loja_id = ? AND c.situacao = 'ativo' "
-        "ORDER BY m.nome",
-        (loja_id,)
-    ).fetchall()
+        "ORDER BY m.nome", (loja_id,)).fetchall()
 
-    if liberados:
-        st.dataframe(
-            [{"Motoboy": r["nome"], "CPF": r["cpf"], "OL": r["ol"],
-              "Placa": r["placa"] or "—",
-              "Tipo": "FREE" if r["tipo"] == "free" else "Fixo",
-              "Facial cadastrado": r["facial"]}
-             for r in liberados],
-            use_container_width=True, hide_index=True)
-        sem_facial = [r["nome"] for r in liberados if r["facial"] == "NÃO"]
-        if sem_facial:
-            st.warning(
-                "⚠️ Sem reconhecimento facial (não vão passar na catraca): "
-                + ", ".join(sem_facial)
-            )
-    else:
-        st.info("Nenhum motoboy liberado nesta loja no momento.")
+    # ---- Topo: título (esquerda) + motos disponíveis (direita) ------------
+    t_l, t_r = st.columns([3, 1])
+    with t_l:
+        st.header(f"🛵 {loja_nome}")
+        st.caption("Painel de expedição — libere as entregas na ordem de chegada.")
+    with t_r:
+        st.metric("Motos disponíveis", n_disp, help="Motoboys na fila, prontos para sair.")
+        if st.button("🔄 Atualizar", use_container_width=True, key="op_refresh"):
+            st.rerun()
+
+    if n_disp == 0:
+        st.error("🚨 **Nenhuma moto disponível** na fila. Chame motoboys para a expedição.")
+    elif n_disp <= LIMITE_ALERTA:
+        st.warning(f"⚠️ **As motos disponíveis estão acabando:** só **{n_disp}** na fila. "
+                   "Acione mais motoboys.")
 
     st.divider()
 
     # =======================================================================
-    # 2) FILA FIFO DE EXPEDIÇÃO — ordem de chegada (testável já)
+    # 1) FILA FIFO DE EXPEDIÇÃO — parte principal
     # =======================================================================
-    st.subheader("🔁 Fila de expedição (FIFO)")
-    st.caption(
-        "Quando o motoboy passa no reconhecimento facial e entra na expedição, "
-        "registre a chegada abaixo. As entregas são liberadas na **ordem de chegada**."
-    )
+    st.subheader("🔁 Fila de expedição — ordem de chegada")
 
-    # Registrar chegada (check-in) de um motoboy liberado nesta loja.
     opcoes_ch = {f"{r['nome']} — {r['placa'] or 's/placa'}": r for r in liberados}
     if opcoes_ch:
         ch1, ch2 = st.columns([3, 1])
@@ -2456,11 +2496,9 @@ def tela_operador(usuario):
         except Exception:
             return None
 
-    fila = db.fila_aguardando(conn, loja_id)
     if not fila:
         st.info("Fila vazia — ninguém aguardando expedição nesta loja.")
     else:
-        st.markdown(f"**{len(fila)} na fila** (o 1º é o próximo a sair):")
         for pos, f in enumerate(fila, start=1):
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 4, 2])
@@ -2495,78 +2533,86 @@ def tela_operador(usuario):
     st.divider()
 
     # =======================================================================
-    # 3) MOVIMENTAÇÃO NA CATRACA (automático — depende do AccessLog do DMP)
+    # 2) MOTOBOYS LIBERADOS NESTA LOJA
     # =======================================================================
-    st.subheader("🛵 Movimentação na catraca")
-
-    # Tenta puxar eventos novos do DMP.
-    estado = conn.execute(
-        "SELECT ultimo_pointer FROM acesso_estado WHERE id=1").fetchone()
-    ultimo_pointer = estado["ultimo_pointer"] if estado else 0
-
-    erro_accesslog = None
-    novos = []
-    if st.button("📡 Buscar acessos no DMP", help="Lê os eventos de entrada/saída da catraca."):
-        try:
-            novos = dmp.ler_acessos_desde(ultimo_pointer)
-        except Exception as ex:
-            erro_accesslog = ex
-
-        # Persiste os eventos novos (estrutura defensiva — formato do DMP varia).
-        maior_ptr = ultimo_pointer
-        for ev in (novos or []):
-            try:
-                ptr = int(ev.get("Pointer", ev.get("Id", 0)) or 0)
-                cpf_ev = str(ev.get("Cpf", ev.get("RegistrationNumber", "")))
-                nome_ev = ev.get("Name", ev.get("PersonName", ""))
-                quando = ev.get("AccessDate", ev.get("Date", ""))
-                mb = conn.execute(
-                    "SELECT id FROM motoboys WHERE cpf=? OR cpf=?",
-                    (cpf_ev, "".join(filter(str.isdigit, cpf_ev)))
-                ).fetchone()
-                conn.execute(
-                    "INSERT INTO acesso_eventos "
-                    "(motoboy_id, loja_id, cpf, nome, tipo, ocorrido_em, dmp_pointer) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (mb["id"] if mb else None, loja_id, cpf_ev, nome_ev,
-                     "entrada", str(quando), ptr))
-                maior_ptr = max(maior_ptr, ptr)
-            except Exception:
-                continue
-        if maior_ptr > ultimo_pointer:
-            conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1",
-                         (maior_ptr,))
-            conn.commit()
-
-    if erro_accesslog:
-        msg = str(erro_accesslog)
-        if "401" in msg or "denied" in msg.lower():
-            st.warning(
-                "🔒 O AccessLog (eventos da catraca) ainda **não está liberado** "
-                "para esta conta no DMP. Solicite à DIMEP/TAGUS-TEC a permissão "
-                "`ACCESS_LOG` para o CNPJ 32757781000150. "
-                "Enquanto isso, a lista de liberados acima já permite validar o teste facial."
-            )
-        else:
-            st.error(f"Erro ao ler o AccessLog: {msg}")
-    elif novos:
-        st.success(f"{len(novos)} evento(s) novos importados do DMP.")
-
-    # Mostra os últimos acessos registrados desta loja.
-    eventos = conn.execute(
-        "SELECT nome, cpf, tipo, ocorrido_em FROM acesso_eventos "
-        "WHERE loja_id=? ORDER BY id DESC LIMIT 20",
-        (loja_id,)
-    ).fetchall()
-
-    if eventos:
+    st.subheader("✅ Motoboys liberados nesta loja")
+    st.caption("Motoboys com acesso ATIVO aqui — a catraca deve reconhecer só estes.")
+    if liberados:
         st.dataframe(
-            [{"Motoboy": e["nome"] or e["cpf"], "CPF": e["cpf"],
-              "Evento": e["tipo"], "Quando": e["ocorrido_em"]}
-             for e in eventos],
+            [{"Motoboy": r["nome"], "CPF": r["cpf"], "OL": r["ol"],
+              "Placa": r["placa"] or "—",
+              "Tipo": "FREE" if r["tipo"] == "free" else "Fixo",
+              "Facial": r["facial"]}
+             for r in liberados],
             use_container_width=True, hide_index=True)
+        sem_facial = [r["nome"] for r in liberados if r["facial"] == "NÃO"]
+        if sem_facial:
+            st.warning("⚠️ Sem reconhecimento facial (não passam na catraca): "
+                       + ", ".join(sem_facial))
     else:
-        st.caption("Nenhum acesso registrado ainda nesta loja.")
+        st.info("Nenhum motoboy liberado nesta loja no momento.")
+
+    # =======================================================================
+    # 3) MOVIMENTAÇÃO NA CATRACA (avançado — depende do AccessLog do DMP)
+    # =======================================================================
+    with st.expander("🛰️ Movimentação na catraca (avançado)"):
+        estado = conn.execute(
+            "SELECT ultimo_pointer FROM acesso_estado WHERE id=1").fetchone()
+        ultimo_pointer = estado["ultimo_pointer"] if estado else 0
+        erro_accesslog = None
+        novos = []
+        if st.button("📡 Buscar acessos no DMP"):
+            try:
+                novos = dmp.ler_acessos_desde(ultimo_pointer)
+            except Exception as ex:
+                erro_accesslog = ex
+            maior_ptr = ultimo_pointer
+            for ev in (novos or []):
+                try:
+                    ptr = int(ev.get("Pointer", ev.get("Id", 0)) or 0)
+                    cpf_ev = str(ev.get("Cpf", ev.get("RegistrationNumber", "")))
+                    nome_ev = ev.get("Name", ev.get("PersonName", ""))
+                    quando = ev.get("AccessDate", ev.get("Date", ""))
+                    mb = conn.execute(
+                        "SELECT id FROM motoboys WHERE cpf=? OR cpf=?",
+                        (cpf_ev, "".join(filter(str.isdigit, cpf_ev)))).fetchone()
+                    conn.execute(
+                        "INSERT INTO acesso_eventos "
+                        "(motoboy_id, loja_id, cpf, nome, tipo, ocorrido_em, dmp_pointer) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (mb["id"] if mb else None, loja_id, cpf_ev, nome_ev,
+                         "entrada", str(quando), ptr))
+                    maior_ptr = max(maior_ptr, ptr)
+                except Exception:
+                    continue
+            if maior_ptr > ultimo_pointer:
+                conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1",
+                             (maior_ptr,))
+                conn.commit()
+
+        if erro_accesslog:
+            msg = str(erro_accesslog)
+            if "401" in msg or "denied" in msg.lower():
+                st.warning(
+                    "🔒 O AccessLog (eventos da catraca) ainda não está liberado para "
+                    "esta conta no DMP. Solicite à DIMEP a permissão `ACCESS_LOG`. "
+                    "Enquanto isso, a chegada é registrada na fila acima."
+                )
+            else:
+                st.error(f"Erro ao ler o AccessLog: {msg}")
+        elif novos:
+            st.success(f"{len(novos)} evento(s) novos importados do DMP.")
+
+        eventos = conn.execute(
+            "SELECT nome, cpf, tipo, ocorrido_em FROM acesso_eventos "
+            "WHERE loja_id=? ORDER BY id DESC LIMIT 20", (loja_id,)).fetchall()
+        if eventos:
+            st.dataframe(
+                [{"Motoboy": e["nome"] or e["cpf"], "CPF": e["cpf"],
+                  "Evento": e["tipo"], "Quando": e["ocorrido_em"]} for e in eventos],
+                use_container_width=True, hide_index=True)
+        else:
+            st.caption("Nenhum acesso registrado ainda nesta loja.")
 
     conn.close()
 

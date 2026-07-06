@@ -717,6 +717,33 @@ def get_foto_selfie(conn, motoboy_id):
     return None
 
 
+# ---- Senha de acesso do operador por loja (guardada em configuracoes) -----
+
+def set_senha_loja(conn, loja_id, senha):
+    """Define/atualiza a senha que o operador usa para acessar esta loja (bcrypt)."""
+    set_config(conn, f"op_senha_{loja_id}", _hash(senha))
+    conn.commit()
+
+
+def tem_senha_loja(conn, loja_id) -> bool:
+    return get_config(conn, f"op_senha_{loja_id}") is not None
+
+
+def verificar_senha_loja(conn, loja_id, senha) -> bool:
+    h = get_config(conn, f"op_senha_{loja_id}")
+    if not h:
+        return False
+    try:
+        return bcrypt.checkpw((senha or "").encode(), h.encode())
+    except Exception:
+        return False
+
+
+def remover_senha_loja(conn, loja_id):
+    conn.execute("DELETE FROM configuracoes WHERE chave=?", (f"op_senha_{loja_id}",))
+    conn.commit()
+
+
 # ---- Fila FIFO de expedição (painel do operador) --------------------------
 
 def registrar_chegada(conn, loja_id, motoboy_id) -> bool:
