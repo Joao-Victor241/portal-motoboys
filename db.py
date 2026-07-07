@@ -770,6 +770,69 @@ def mapa_equip_loja(conn):
     return m
 
 
+# ---- Prestação de contas: documentos obrigatórios + justificativas --------
+
+def set_docs_obrigatorios(conn, lista):
+    """Lista de tipos de documento que TODO motoboy deve enviar por competência
+    (definida pelo admin). Guardada em configuracoes."""
+    set_config(conn, "docs_obrigatorios", "||".join(lista or []))
+    conn.commit()
+
+
+def get_docs_obrigatorios(conn):
+    v = get_config(conn, "docs_obrigatorios", "") or ""
+    return [x for x in v.split("||") if x]
+
+
+def salvar_justificativa(conn, ol_id, competencia, motoboy_id, tipo, texto, criado_por):
+    """OL justifica o NÃO envio de um documento. Fica 'pendente' até o financeiro
+    aprovar/reprovar. Reenviar a justificativa volta ao estado 'pendente'."""
+    ex = conn.execute(
+        "SELECT id FROM prestacao_justificativas WHERE ol_id=? AND competencia=? "
+        "AND motoboy_id=? AND tipo=?", (ol_id, competencia, motoboy_id, tipo)).fetchone()
+    if ex:
+        conn.execute(
+            "UPDATE prestacao_justificativas SET texto=?, status='pendente', "
+            "motivo_reprovacao=NULL, decidido_por=NULL, decidido_em=NULL WHERE id=?",
+            (texto, ex["id"]))
+    else:
+        conn.execute(
+            "INSERT INTO prestacao_justificativas "
+            "(ol_id, competencia, motoboy_id, tipo, texto, status, criado_por) "
+            "VALUES (?,?,?,?,?, 'pendente', ?)",
+            (ol_id, competencia, motoboy_id, tipo, texto, criado_por))
+    conn.commit()
+
+
+def justificativas_da_ol(conn, ol_id, competencia):
+    """{(motoboy_id, tipo): row} das justificativas dessa OL/competência."""
+    rows = conn.execute(
+        "SELECT id, motoboy_id, tipo, texto, status, motivo_reprovacao "
+        "FROM prestacao_justificativas WHERE ol_id=? AND competencia=?",
+        (ol_id, competencia)).fetchall()
+    return {(r["motoboy_id"], r["tipo"]): r for r in rows}
+
+
+def decidir_justificativa(conn, just_id, aprovar, motivo, decidido_por):
+    """Financeiro aprova/reprova uma justificativa de não envio."""
+    conn.execute(
+        "UPDATE prestacao_justificativas SET status=?, motivo_reprovacao=?, "
+        "decidido_por=?, decidido_em=? WHERE id=?",
+        ("aprovada" if aprovar else "reprovada", None if aprovar else motivo,
+         decidido_por, _agora_br(), just_id))
+    conn.commit()
+
+
+def enviados_por_motoboy_tipo(conn, ol_id, competencia):
+    """{(motoboy_id, tipo)} que já têm documento enviado nessa competência."""
+    rows = conn.execute(
+        "SELECT DISTINCT pv.motoboy_id, pv.tipo FROM prestacao_valores pv "
+        "JOIN prestacao_documentos pd ON pd.id = pv.documento_id "
+        "WHERE pd.ol_id=? AND pd.competencia=? AND pv.motoboy_id IS NOT NULL",
+        (ol_id, competencia)).fetchall()
+    return {(r["motoboy_id"], r["tipo"]) for r in rows}
+
+
 # ---- Fila FIFO de expedição (painel do operador) --------------------------
 
 def registrar_chegada(conn, loja_id, motoboy_id, chegada_em=None) -> bool:
@@ -879,6 +942,14 @@ def garantir_tabelas_prestacao(conn):
         f" id {serial}, documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),"
         f" nome_arquivo TEXT, mime TEXT, arquivo {blob})")
     conn.execute("CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT)")
+    # Justificativas de NÃO envio (OL) — aprovadas/reprovadas pelo financeiro.
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS prestacao_justificativas ("
+        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT NOT NULL,"
+        f" motoboy_id INTEGER, tipo TEXT NOT NULL, texto TEXT,"
+        f" status TEXT NOT NULL DEFAULT 'pendente', motivo_reprovacao TEXT,"
+        f" criado_por INTEGER, decidido_por INTEGER, decidido_em TEXT,"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
     # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
     _cols_valores = [("tipo", "TEXT")]

@@ -113,6 +113,13 @@ def _aplicar_estilo():
 
 HOJE = date.today()
 
+# Tipos de documento da prestação de contas (usado na OL e no admin).
+TIPOS_DOCUMENTO = [
+    "Contracheque", "Periculosidade", "Vale alimentação", "Aluguel da moto",
+    "Combustível", "Guia FGTS / RE", "Férias e recibos",
+    "Atestado / INSS (afastamento)", "Rescisão", "13º salário", "Pendências",
+]
+
 
 def _desativar_free_vencidos():
     """
@@ -1200,11 +1207,7 @@ def tela_ol(usuario):
             "validados automaticamente."
         )
 
-        TIPOS_DOC = [
-            "Contracheque", "Periculosidade", "Vale alimentação", "Aluguel da moto",
-            "Combustível", "Guia FGTS / RE", "Férias e recibos",
-            "Atestado / INSS (afastamento)", "Rescisão", "13º salário", "Pendências",
-        ]
+        TIPOS_DOC = TIPOS_DOCUMENTO
         OUTROS = "Outros (vários documentos no mesmo arquivo)"
         MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -1219,6 +1222,71 @@ def tela_ol(usuario):
             st.info("Cadastre seus motoboys primeiro (aba **Novo cadastro**) "
                     "para poder enviar a prestação de contas.")
         else:
+            obrigatorios = db.get_docs_obrigatorios(conn)
+
+            # ---- Relação de entregadores: o que falta enviar (por competência) ----
+            with st.container(border=True):
+                st.markdown("#### 📋 Relação de entregadores — status dos documentos")
+                if not obrigatorios:
+                    st.info("O admin ainda não definiu os **documentos obrigatórios**. "
+                            "Assim que definir, aparece aqui, por motoboy, o que falta enviar.")
+                else:
+                    rc1, rc2 = st.columns(2)
+                    _mes_rel = rc1.selectbox("Mês", MESES, index=HOJE.month - 1, key="rel_mes")
+                    _anos_rel = list(range(HOJE.year - 1, HOJE.year + 1))
+                    _ano_rel = rc2.selectbox("Ano", _anos_rel,
+                                             index=_anos_rel.index(HOJE.year), key="rel_ano")
+                    comp_rel = f"{_ano_rel}-{MESES.index(_mes_rel) + 1:02d}"
+                    enviados = db.enviados_por_motoboy_tipo(conn, ol_id, comp_rel)
+                    justs = db.justificativas_da_ol(conn, ol_id, comp_rel)
+
+                    def _status_doc(mid, tp):
+                        if (mid, tp) in enviados:
+                            return "✅ enviado"
+                        j = justs.get((mid, tp))
+                        if j:
+                            return {"aprovada": "🟢 justificado",
+                                    "reprovada": "❌ justif. reprovada"}.get(
+                                        j["status"], "📝 justif. em análise")
+                        return "⏳ faltante"
+
+                    linhas_rel = []
+                    faltam = 0
+                    for m in motoboys_ol:
+                        linha = {"Motoboy": m["nome"]}
+                        for tp in obrigatorios:
+                            s = _status_doc(m["id"], tp)
+                            linha[tp] = s
+                            if s in ("⏳ faltante", "❌ justif. reprovada"):
+                                faltam += 1
+                        linhas_rel.append(linha)
+                    st.dataframe(linhas_rel, use_container_width=True, hide_index=True)
+                    if faltam:
+                        st.warning(f"⚠️ {faltam} documento(s) pendente(s) — faltante ou "
+                                   f"justificativa reprovada — em {comp_rel}.")
+                    else:
+                        st.success(f"✅ Tudo enviado/justificado em {comp_rel}.")
+
+                    with st.expander("📝 Justificar o NÃO envio de um documento"):
+                        jc1, jc2 = st.columns(2)
+                        _mb_just = jc1.selectbox("Motoboy", [m["nome"] for m in motoboys_ol],
+                                                 key="just_mb")
+                        _tp_just = jc2.selectbox("Documento", obrigatorios, key="just_tp")
+                        _txt_just = st.text_area("Motivo do não envio", key="just_txt",
+                                                 placeholder="Ex.: motoboy admitido este mês, "
+                                                             "sem contracheque ainda.")
+                        if st.button("Enviar justificativa", key="just_btn", type="primary"):
+                            if _txt_just.strip():
+                                _mid = next(m["id"] for m in motoboys_ol
+                                            if m["nome"] == _mb_just)
+                                db.salvar_justificativa(conn, ol_id, comp_rel, _mid, _tp_just,
+                                                        _txt_just.strip(), usuario["id"])
+                                st.success("Justificativa enviada — aguardando análise do "
+                                           "responsável pela conferência.")
+                                st.rerun()
+                            else:
+                                st.error("Descreva o motivo do não envio.")
+
             with st.container(border=True):
                 st.markdown("**Enviar novo documento**")
                 tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC + [OUTROS], key="pc_tipo")
@@ -1294,8 +1362,17 @@ def tela_ol(usuario):
                                    for mid, t, v in valores_pendentes if v and v > 0]
                         tipo_final = "Outros" if eh_outros else tipo_doc
                         competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
-                        arquivos_dados = [(f.name, f.type or "application/octet-stream",
-                                           f.getvalue()) for f in arquivos]
+                        # Renomeia os arquivos: "Nome do motoboy - Tipo - AAAA-MM".
+                        base_nome = mb_nome if escopo_db == "individual" else "Geral"
+                        _total = len(arquivos)
+                        arquivos_dados = []
+                        for _i, f in enumerate(arquivos):
+                            _ext = os.path.splitext(f.name)[1] or ""
+                            _suf = f" ({_i + 1})" if _total > 1 else ""
+                            _nome_pad = (f"{base_nome} - {tipo_final} - {competencia}"
+                                         f"{_suf}{_ext}").replace("/", "-").replace("\\", "-")
+                            arquivos_dados.append(
+                                (_nome_pad, f.type or "application/octet-stream", f.getvalue()))
                         try:
                             doc_id = db.salvar_prestacao(
                                 conn, ol_id, tipo_final, competencia, escopo_db,
@@ -1564,6 +1641,19 @@ def tela_admin(usuario):
                     st.json(p["ultimo"])
                 if not p.get("primeiro") and p.get("resposta"):
                     st.code(p["resposta"], language=None)
+
+    with st.expander("📑 Documentos obrigatórios (prestação de contas)"):
+        st.caption("Marque os tipos de documento que TODO motoboy deve enviar por "
+                   "competência. O portal usa isso para mostrar, na relação de "
+                   "entregadores da OL, o que está faltando.")
+        _atuais_ob = db.get_docs_obrigatorios(conn)
+        _sel_ob = st.multiselect(
+            "Documentos obrigatórios", TIPOS_DOCUMENTO,
+            default=[t for t in _atuais_ob if t in TIPOS_DOCUMENTO], key="adm_docs_ob")
+        if st.button("Salvar obrigatórios", key="adm_docs_ob_btn", type="primary"):
+            db.set_docs_obrigatorios(conn, _sel_ob)
+            st.success("Documentos obrigatórios atualizados.")
+            st.rerun()
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
