@@ -122,9 +122,9 @@ class DMPClient:
             return js
         return js.get("items", js.get("Items", [])) if isinstance(js, dict) else []
 
-    def diagnostico_accesslog(self, data_ini, data_fim, log_type: int = 1) -> dict:
-        """Testa logon + leitura do AccessLog e devolve status/resposta de cada
-        passo (para o painel admin confirmar a integração ao vivo)."""
+    def diagnostico_accesslog(self, data_ini, data_fim, log_types=(0, 1, 2, 3, 4, 5, 6)) -> dict:
+        """Testa logon + leitura do AccessLog VARRENDO vários logTypes (um único
+        logon), para descobrir qual devolve dados. Devolve status/resposta de cada."""
         out = {"tem_token": bool(self.nak_accesslog), "passos": []}
         if self.simulado:
             out["passos"].append({"passo": "modo simulado", "status": "-", "resposta": ""})
@@ -136,15 +136,22 @@ class DMPClient:
                 params={"username": self.username, "password": self.password, "culture": "pt-BR"},
                 headers={"Authorization": f"NAK {token}"}, timeout=30)
             out["passos"].append({"passo": "Logon (NAK do AccessLog)",
-                                  "status": r.status_code, "resposta": (r.text or "")[:250]})
+                                  "status": r.status_code, "resposta": (r.text or "")[:150]})
             if r.status_code == 200:
                 bearer = r.json().get("access_token", "")
-                url = (f"{self.base_url}/api/v1/AccessLog/"
-                       f"{data_ini.year}/{data_ini.month}/{data_ini.day}/"
-                       f"{data_fim.year}/{data_fim.month}/{data_fim.day}/{log_type}")
-                r2 = self._sessao.get(url, headers={"Authorization": f"Bearer {bearer}"}, timeout=40)
-                out["passos"].append({"passo": f"AccessLog (logType={log_type})",
-                                      "status": r2.status_code, "resposta": (r2.text or "")[:600]})
+                for lt in log_types:
+                    url = (f"{self.base_url}/api/v1/AccessLog/"
+                           f"{data_ini.year}/{data_ini.month}/{data_ini.day}/"
+                           f"{data_fim.year}/{data_fim.month}/{data_fim.day}/{lt}")
+                    try:
+                        r2 = self._sessao.get(url, headers={"Authorization": f"Bearer {bearer}"},
+                                              timeout=40)
+                        out["passos"].append({"passo": f"AccessLog logType={lt}",
+                                              "status": r2.status_code,
+                                              "resposta": (r2.text or "")[:500]})
+                    except Exception as e2:
+                        out["passos"].append({"passo": f"AccessLog logType={lt}",
+                                              "status": "ERRO", "resposta": str(e2)})
         except Exception as e:
             out["passos"].append({"passo": "exceção", "status": "ERRO", "resposta": str(e)})
         return out

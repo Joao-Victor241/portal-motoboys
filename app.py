@@ -1522,12 +1522,14 @@ def tela_admin(usuario):
         st.caption("Testa a leitura dos acessos da catraca com o token do AccessLog. "
                    "Defina **DMP_NAK_ACCESSLOG** nos Secrets primeiro. Me mande o "
                    "resultado para eu ligar a fila FIFO automática.")
-        alc1, alc2, alc3 = st.columns(3)
-        _al_di = alc1.date_input("De", value=HOJE, key="al_di", format="DD/MM/YYYY")
+        st.caption("Dica: escolha um intervalo em que **houve acessos** na catraca "
+                   "(ex.: os últimos 7 dias). O teste varre vários logTypes.")
+        alc1, alc2 = st.columns(2)
+        _al_di = alc1.date_input("De", value=HOJE - timedelta(days=7),
+                                 key="al_di", format="DD/MM/YYYY")
         _al_df = alc2.date_input("Até", value=HOJE, key="al_df", format="DD/MM/YYYY")
-        _al_lt = alc3.number_input("logType", value=1, step=1, key="al_lt")
         if st.button("🛰️ Testar AccessLog", key="al_btn", type="primary"):
-            diag = dmp.diagnostico_accesslog(_al_di, _al_df, int(_al_lt))
+            diag = dmp.diagnostico_accesslog(_al_di, _al_df)
             st.write(f"**Token AccessLog configurado:** "
                      f"{'✅ sim' if diag.get('tem_token') else '❌ NÃO (defina DMP_NAK_ACCESSLOG)'}")
             for p in diag.get("passos", []):
