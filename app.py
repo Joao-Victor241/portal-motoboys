@@ -1207,6 +1207,20 @@ def tela_ol(usuario):
             "validados automaticamente."
         )
 
+        # Avisos do Grupo Bueno para esta OL (inconsistências, pendências etc.)
+        _msgs_ol = db.mensagens_da_ol(conn, ol_id)
+        _msgs_novas = [mm for mm in _msgs_ol if not mm["lido"]]
+        if _msgs_ol:
+            with st.expander(f"📨 Avisos do Grupo Bueno ({len(_msgs_novas)} novo(s))",
+                             expanded=bool(_msgs_novas)):
+                for mm in _msgs_ol:
+                    novo = "🔴 " if not mm["lido"] else ""
+                    quando = (mm["criado_em"] or "")[:16].replace("T", " ")
+                    st.markdown(f"{novo}**{quando}** — {mm['texto']}")
+                if _msgs_novas and st.button("Marcar como lidas", key="msg_lidas"):
+                    db.marcar_mensagens_lidas(conn, ol_id)
+                    st.rerun()
+
         TIPOS_DOC = TIPOS_DOCUMENTO
         OUTROS = "Outros (vários documentos no mesmo arquivo)"
         MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -1407,7 +1421,8 @@ def tela_ol(usuario):
                       "Competência": d["competencia"] or "—",
                       "Escopo": "Geral" if d["escopo"] == "geral" else "Individual",
                       "Valor total": f"R$ {d['total']:.2f}" if d["total"] else "—",
-                      "Status": "✅ Validado" if d["status"] == "validado" else "🕒 Pendente",
+                      "Status": {"validado": "✅ Validado",
+                                 "rejeitado": "❌ Reprovado"}.get(d["status"], "🕒 Pendente"),
                       "Enviado em": (d["criado_em"] or "")[:16].replace("T", " "),
                       "Arquivo": d["nome_arquivo"] or "—"}
                      for d in docs],
@@ -2220,6 +2235,70 @@ def tela_admin(usuario):
         st.caption("Documentos enviados pelas OLs. Baixe para conferir; o status "
                    "indica se já foi validado.")
 
+        # --- Resumo de inconsistências por OL + mensagem automática ----------
+        with st.expander("📊 Resumo de inconsistências + mensagem à OL"):
+            _obrig = db.get_docs_obrigatorios(conn)
+            _comps_adm = conn.execute(
+                "SELECT DISTINCT competencia FROM prestacao_documentos "
+                "WHERE competencia IS NOT NULL "
+                "UNION SELECT DISTINCT competencia FROM prestacao_justificativas "
+                "WHERE competencia IS NOT NULL ORDER BY competencia DESC").fetchall()
+            _lista_comp = [c["competencia"] for c in _comps_adm if c["competencia"]]
+            if not _obrig:
+                st.info("Defina os **documentos obrigatórios** primeiro (expander no topo "
+                        "do painel admin).")
+            elif not _lista_comp:
+                st.caption("Ainda não há envios/justificativas para resumir.")
+            else:
+                _comp_adm = st.selectbox("Competência", _lista_comp, key="adm_resumo_comp")
+                resumo = []
+                for _o in conn.execute(
+                        "SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall():
+                    _mbs = conn.execute(
+                        "SELECT m.id FROM motoboys_ol mol JOIN motoboys m ON m.id=mol.motoboy_id "
+                        "WHERE mol.ol_id=?", (_o["id"],)).fetchall()
+                    if not _mbs:
+                        continue
+                    _env = db.enviados_por_motoboy_tipo(conn, _o["id"], _comp_adm)
+                    _jus = db.justificativas_da_ol(conn, _o["id"], _comp_adm)
+                    faltantes = 0
+                    for _m in _mbs:
+                        for _t in _obrig:
+                            if (_m["id"], _t) in _env:
+                                continue
+                            jj = _jus.get((_m["id"], _t))
+                            if jj and jj["status"] == "aprovada":
+                                continue
+                            faltantes += 1
+                    resumo.append({
+                        "ol_id": _o["id"], "OL": _o["nome"], "Faltantes": faltantes,
+                        "Docs reprovados": len(db.docs_reprovados_ol(conn, _o["id"], _comp_adm)),
+                        "Justif. reprovadas": sum(1 for jj in _jus.values()
+                                                  if jj["status"] == "reprovada"),
+                        "Justif. pendentes": sum(1 for jj in _jus.values()
+                                                 if jj["status"] == "pendente")})
+                if not resumo:
+                    st.caption("Nenhuma OL com motoboys cadastrados.")
+                else:
+                    st.dataframe([{k: v for k, v in r.items() if k != "ol_id"} for r in resumo],
+                                 use_container_width=True, hide_index=True)
+                    _map_ol = {r["OL"]: r for r in resumo}
+                    _ol_msg = st.selectbox("Enviar mensagem para a OL",
+                                           list(_map_ol.keys()), key="adm_msg_ol")
+                    _r = _map_ol[_ol_msg]
+                    _sug = (f"Prestação {_comp_adm}: {_r['Faltantes']} documento(s) "
+                            f"faltante(s), {_r['Docs reprovados']} reprovado(s), "
+                            f"{_r['Justif. reprovadas']} justificativa(s) reprovada(s). "
+                            "Regularize no portal, por favor.")
+                    _txt_msg = st.text_area("Mensagem", value=_sug, key="adm_msg_txt")
+                    if st.button("📨 Enviar mensagem à OL", type="primary", key="adm_msg_btn"):
+                        if _txt_msg.strip():
+                            db.enviar_mensagem_ol(conn, _r["ol_id"], _txt_msg.strip(),
+                                                  _comp_adm, usuario["id"])
+                            st.success(f"Mensagem enviada para {_ol_msg}.")
+                        else:
+                            st.warning("Escreva a mensagem.")
+
         # --- Prazo de entrega (dispara o lembrete nas OLs 1 semana antes) ---
         with st.expander("⏰ Prazo de entrega da prestação de contas"):
             prazo_atual = db.get_config(conn, "prazo_prestacao")
@@ -2429,6 +2508,34 @@ def tela_financeiro(usuario):
 
     conn = db.conectar()
     db.garantir_tabelas_prestacao(conn)
+
+    # ---- Justificativas de não envio (aprovar/reprovar) --------------------
+    _pend = db.justificativas_pendentes(conn)
+    with st.expander(f"📝 Justificativas de não envio — {len(_pend)} pendente(s)",
+                     expanded=bool(_pend)):
+        if not _pend:
+            st.caption("Nenhuma justificativa aguardando análise.")
+        for j in _pend:
+            with st.container(border=True):
+                st.markdown(f"**{j['ol']}** · {j['motoboy'] or '(geral)'} · "
+                            f"**{j['tipo']}** · {j['competencia']}")
+                st.caption(f"Motivo informado pela OL: _{j['texto'] or '—'}_")
+                cja, cjr = st.columns([1, 2])
+                if cja.button("✅ Aprovar", key=f"japr_{j['id']}",
+                              type="primary", use_container_width=True):
+                    db.decidir_justificativa(conn, j["id"], True, None, usuario["id"])
+                    st.rerun()
+                _mot = cjr.text_input("Motivo da reprovação", key=f"jmot_{j['id']}",
+                                      placeholder="motivo (obrigatório para reprovar)",
+                                      label_visibility="collapsed")
+                if cjr.button("❌ Reprovar justificativa", key=f"jrep_{j['id']}",
+                              use_container_width=True):
+                    if _mot.strip():
+                        db.decidir_justificativa(conn, j["id"], False, _mot.strip(),
+                                                 usuario["id"])
+                        st.rerun()
+                    else:
+                        st.warning("Informe o motivo da reprovação.")
 
     # ---- Filtros -----------------------------------------------------------
     ols_lst = conn.execute("SELECT id, nome FROM ols ORDER BY nome").fetchall()

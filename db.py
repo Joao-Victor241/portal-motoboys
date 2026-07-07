@@ -833,6 +833,42 @@ def enviados_por_motoboy_tipo(conn, ol_id, competencia):
     return {(r["motoboy_id"], r["tipo"]) for r in rows}
 
 
+def justificativas_pendentes(conn):
+    """Justificativas de não envio aguardando análise do financeiro."""
+    return conn.execute(
+        "SELECT j.id, j.ol_id, o.nome AS ol, j.competencia, j.motoboy_id, "
+        "m.nome AS motoboy, j.tipo, j.texto, j.criado_em "
+        "FROM prestacao_justificativas j "
+        "JOIN ols o ON o.id=j.ol_id LEFT JOIN motoboys m ON m.id=j.motoboy_id "
+        "WHERE j.status='pendente' ORDER BY j.criado_em").fetchall()
+
+
+def enviar_mensagem_ol(conn, ol_id, texto, competencia=None, criado_por=None):
+    conn.execute(
+        "INSERT INTO mensagens_ol (ol_id, competencia, texto, criado_por) VALUES (?,?,?,?)",
+        (ol_id, competencia, texto, criado_por))
+    conn.commit()
+
+
+def mensagens_da_ol(conn, ol_id, limite=20):
+    return conn.execute(
+        "SELECT id, competencia, texto, lido, criado_em FROM mensagens_ol "
+        "WHERE ol_id=? ORDER BY id DESC LIMIT ?", (ol_id, limite)).fetchall()
+
+
+def marcar_mensagens_lidas(conn, ol_id):
+    conn.execute("UPDATE mensagens_ol SET lido=1 WHERE ol_id=? AND lido=0", (ol_id,))
+    conn.commit()
+
+
+def docs_reprovados_ol(conn, ol_id, competencia):
+    """Documentos (envios) reprovados pelo financeiro nessa OL/competência."""
+    return conn.execute(
+        "SELECT id, tipo, competencia FROM prestacao_documentos "
+        "WHERE ol_id=? AND competencia=? AND status='rejeitado' ORDER BY id DESC",
+        (ol_id, competencia)).fetchall()
+
+
 # ---- Fila FIFO de expedição (painel do operador) --------------------------
 
 def registrar_chegada(conn, loja_id, motoboy_id, chegada_em=None) -> bool:
@@ -949,6 +985,12 @@ def garantir_tabelas_prestacao(conn):
         f" motoboy_id INTEGER, tipo TEXT NOT NULL, texto TEXT,"
         f" status TEXT NOT NULL DEFAULT 'pendente', motivo_reprovacao TEXT,"
         f" criado_por INTEGER, decidido_por INTEGER, decidido_em TEXT,"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    # Mensagens/avisos do admin para uma OL (aparecem no portal da OL).
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS mensagens_ol ("
+        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT, texto TEXT NOT NULL,"
+        f" lido INTEGER NOT NULL DEFAULT 0, criado_por INTEGER,"
         f" criado_em TEXT NOT NULL DEFAULT {ts})")
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
     # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
