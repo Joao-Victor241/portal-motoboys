@@ -2560,11 +2560,14 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     corte = 0 if forcar else ultimo      # forçar = processa tudo (teste)
     add = novos = com_catraca = com_ativo = 0
     equips_vistos = set()
+    status_vistos = {}
     for ev in eventos:
         eid = int(ev.get("Id") or 0)
         if eid <= corte:
             continue                     # já processado
         novos += 1
+        _stt = ev.get("AccessValidationStatus")
+        status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
         equip = str(ev.get("EquipmentNumber") or "").strip()
         equips_vistos.add(equip)
         cpf = _cpf_do_evento(ev)
@@ -2587,7 +2590,8 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     conn.commit()
     return {"lido": len(eventos), "novos": novos, "com_catraca": com_catraca,
             "com_ativo": com_ativo, "add": add, "ultimo": ultimo, "max_id": max_id,
-            "equips": ",".join(sorted(e for e in equips_vistos if e))}
+            "equips": ",".join(sorted(e for e in equips_vistos if e)),
+            "status": status_vistos}
 
 
 def tela_operador(usuario):
