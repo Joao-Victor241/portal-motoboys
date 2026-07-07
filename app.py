@@ -1780,8 +1780,7 @@ def tela_admin(usuario):
     # ABA RELATÓRIOS
     # =========================================================================
     with aba_rel:
-        from datetime import timedelta
-        HOJE_REL = HOJE  # alias para clareza
+        HOJE_REL = HOJE  # alias para clareza (timedelta vem do import do topo)
 
         st.markdown("### 📊 Relatórios operacionais")
         st.caption(
