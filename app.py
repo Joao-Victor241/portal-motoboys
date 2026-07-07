@@ -375,16 +375,19 @@ def tela_ol(usuario):
     lojas = conn.execute("SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
     mapa_lojas = {l["nome"]: l["id"] for l in lojas}
 
-    aba_cadastro, aba_motoboys, aba_prestacao = st.tabs(
-        ["➕ Novo cadastro", "👥 Meus motoboys", "📑 Prestação de contas"])
+    # Navegação por SEÇÃO (radio): lembra a seção entre cliques (não "pula" pra
+    # primeira, como o st.tabs) e renderiza SÓ a seção atual — resolve o bug de
+    # trocar de aba sozinho E deixa muito mais rápido (não renderiza tudo junto).
+    sec = st.radio(
+        "Seção",
+        ["➕ Novo cadastro", "✏️ Editar cadastro", "👥 Meus motoboys",
+         "📑 Prestação de contas"],
+        horizontal=True, key="ol_secao", label_visibility="collapsed")
 
     # =========================================================================
-    # ABA 1 — Novo cadastro (sem campo de loja — cadastro é geral)
+    # SEÇÃO — Novo cadastro (sem campo de loja — cadastro é geral)
     # =========================================================================
-    with aba_cadastro:
-        sub_novo, sub_editar = st.tabs(["➕ Novo", "✏️ Editar cadastro"])
-
-    with sub_novo:
+    if sec == "➕ Novo cadastro":
         # Limpeza CONFIÁVEL do formulário: em vez de apagar as chaves (o Streamlit
         # às vezes mantém o valor antigo do widget), trocamos a "versão" do form —
         # as chaves mudam e o Streamlit cria widgets NOVOS e vazios.
@@ -690,9 +693,9 @@ def tela_ol(usuario):
             st.rerun()
 
     # =========================================================================
-    # SUB-ABA — Editar cadastro
+    # SEÇÃO — Editar cadastro
     # =========================================================================
-    with sub_editar:
+    elif sec == "✏️ Editar cadastro":
         st.markdown("### Editar cadastro de motoboy")
         st.caption(
             "Campos editáveis: tipo de vínculo, data de validade (free), "
@@ -856,9 +859,9 @@ def tela_ol(usuario):
                     st.rerun()
 
     # =========================================================================
-    # ABA 2 — Meus motoboys
+    # SEÇÃO — Meus motoboys
     # =========================================================================
-    with aba_motoboys:
+    elif sec == "👥 Meus motoboys":
         st.markdown("### Meus motoboys")
         st.caption(
             "**Cadastrado** = registro permanente no sistema. "
@@ -1184,9 +1187,9 @@ def tela_ol(usuario):
                             type="primary", use_container_width=True)
 
     # =========================================================================
-    # ABA 3 — Prestação de contas (upload de documentos de pagamento)
+    # SEÇÃO — Prestação de contas (upload de documentos de pagamento)
     # =========================================================================
-    with aba_prestacao:
+    elif sec == "📑 Prestação de contas":
         ol_id = usuario["ol_id"]
         db.garantir_tabelas_prestacao(conn)   # garante as tabelas (à prova de falhas)
         st.markdown("### 📑 Prestação de contas")
