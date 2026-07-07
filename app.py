@@ -1518,6 +1518,23 @@ def tela_admin(usuario):
                 except Exception as _e:
                     st.error(f"Erro no diagnóstico: {_e}")
 
+    with st.expander("🛰️ Diagnóstico do AccessLog (catraca ao vivo)"):
+        st.caption("Testa a leitura dos acessos da catraca com o token do AccessLog. "
+                   "Defina **DMP_NAK_ACCESSLOG** nos Secrets primeiro. Me mande o "
+                   "resultado para eu ligar a fila FIFO automática.")
+        alc1, alc2, alc3 = st.columns(3)
+        _al_di = alc1.date_input("De", value=HOJE, key="al_di", format="DD/MM/YYYY")
+        _al_df = alc2.date_input("Até", value=HOJE, key="al_df", format="DD/MM/YYYY")
+        _al_lt = alc3.number_input("logType", value=1, step=1, key="al_lt")
+        if st.button("🛰️ Testar AccessLog", key="al_btn", type="primary"):
+            diag = dmp.diagnostico_accesslog(_al_di, _al_df, int(_al_lt))
+            st.write(f"**Token AccessLog configurado:** "
+                     f"{'✅ sim' if diag.get('tem_token') else '❌ NÃO (defina DMP_NAK_ACCESSLOG)'}")
+            for p in diag.get("passos", []):
+                st.markdown(f"- **{p['passo']}** → status `{p['status']}`")
+                if p.get("resposta"):
+                    st.code(p["resposta"], language=None)
+
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
     tot_cad = conn.execute("SELECT COUNT(*) FROM cadastros").fetchone()[0]

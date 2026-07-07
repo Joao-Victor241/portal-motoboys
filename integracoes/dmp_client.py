@@ -42,6 +42,11 @@ class DMPClient:
         self.username = os.getenv("DMP_USERNAME", "")
         self.password = os.getenv("DMP_PASSWORD", "")
         self.nak = os.getenv("DMP_NAK", "")
+        # NAK específico do AccessLog (role REPORT/ACCESS_LOG) — segredo, vem do
+        # Secrets/.env, nunca do código. Se vazio, cai no NAK padrão.
+        self.nak_accesslog = os.getenv("DMP_NAK_ACCESSLOG", "")
+        self._bearer_al = None
+        self._bearer_al_exp = 0.0
         # Configurações específicas da conta (com defaults descobertos na API).
         self.org_structure = int(os.getenv("DMP_ORG_STRUCTURE", "398"))
         self.access_profile = int(os.getenv("DMP_ACCESS_PROFILE", "47"))
@@ -76,6 +81,73 @@ class DMPClient:
         if not self.simulado and (not self._bearer or time.time() >= self._bearer_expira_em):
             self.logon()
         return {"Authorization": f"Bearer {self._bearer}"}
+
+    def logon_accesslog(self) -> str:
+        """Logon para o AccessLog: usa o NAK do AccessLog (com role REPORT) + o
+        mesmo usuário/senha, para obter um bearer com o AMBIENTE correto (sem o
+        ambiente, o AccessLog dá 500 'key not present in the dictionary')."""
+        if self.simulado:
+            self._bearer_al = "BEARER-AL-SIMULADO"
+            self._bearer_al_exp = time.time() + 1700
+            return self._bearer_al
+        token = self.nak_accesslog or self.nak
+        resp = self._sessao.get(
+            f"{self.base_url}/api/v1/Logon",
+            params={"username": self.username, "password": self.password, "culture": "pt-BR"},
+            headers={"Authorization": f"NAK {token}"}, timeout=30)
+        resp.raise_for_status()
+        d = resp.json()
+        self._bearer_al = d["access_token"]
+        self._bearer_al_exp = time.time() + int(d.get("expires_in", 1700)) - 60
+        return self._bearer_al
+
+    def _auth_accesslog(self) -> dict:
+        if not self.simulado and (not self._bearer_al or time.time() >= self._bearer_al_exp):
+            self.logon_accesslog()
+        return {"Authorization": f"Bearer {self._bearer_al}"}
+
+    def ler_acessos_periodo(self, data_ini, data_fim, log_type: int = 1) -> list:
+        """GET /api/v1/AccessLog/{aaaa}/{mm}/{dd}/{aaaa}/{mm}/{dd}/{logType}.
+        Lista os eventos de acesso (catraca) entre duas datas. Usa o bearer do
+        AccessLog. Devolve lista (defensivo p/ variações de formato)."""
+        if self.simulado:
+            return []
+        url = (f"{self.base_url}/api/v1/AccessLog/"
+               f"{data_ini.year}/{data_ini.month}/{data_ini.day}/"
+               f"{data_fim.year}/{data_fim.month}/{data_fim.day}/{log_type}")
+        r = self._sessao.get(url, headers=self._auth_accesslog(), timeout=40)
+        r.raise_for_status()
+        js = r.json()
+        if isinstance(js, list):
+            return js
+        return js.get("items", js.get("Items", [])) if isinstance(js, dict) else []
+
+    def diagnostico_accesslog(self, data_ini, data_fim, log_type: int = 1) -> dict:
+        """Testa logon + leitura do AccessLog e devolve status/resposta de cada
+        passo (para o painel admin confirmar a integração ao vivo)."""
+        out = {"tem_token": bool(self.nak_accesslog), "passos": []}
+        if self.simulado:
+            out["passos"].append({"passo": "modo simulado", "status": "-", "resposta": ""})
+            return out
+        token = self.nak_accesslog or self.nak
+        try:
+            r = self._sessao.get(
+                f"{self.base_url}/api/v1/Logon",
+                params={"username": self.username, "password": self.password, "culture": "pt-BR"},
+                headers={"Authorization": f"NAK {token}"}, timeout=30)
+            out["passos"].append({"passo": "Logon (NAK do AccessLog)",
+                                  "status": r.status_code, "resposta": (r.text or "")[:250]})
+            if r.status_code == 200:
+                bearer = r.json().get("access_token", "")
+                url = (f"{self.base_url}/api/v1/AccessLog/"
+                       f"{data_ini.year}/{data_ini.month}/{data_ini.day}/"
+                       f"{data_fim.year}/{data_fim.month}/{data_fim.day}/{log_type}")
+                r2 = self._sessao.get(url, headers={"Authorization": f"Bearer {bearer}"}, timeout=40)
+                out["passos"].append({"passo": f"AccessLog (logType={log_type})",
+                                      "status": r2.status_code, "resposta": (r2.text or "")[:600]})
+        except Exception as e:
+            out["passos"].append({"passo": "exceção", "status": "ERRO", "resposta": str(e)})
+        return out
 
     def diagnostico(self) -> dict:
         """
