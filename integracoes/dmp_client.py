@@ -106,7 +106,7 @@ class DMPClient:
             self.logon_accesslog()
         return {"Authorization": f"Bearer {self._bearer_al}"}
 
-    def ler_acessos_periodo(self, data_ini, data_fim, log_type: int = 1) -> list:
+    def ler_acessos_periodo(self, data_ini, data_fim, log_type: int = 0) -> list:
         """GET /api/v1/AccessLog/{aaaa}/{mm}/{dd}/{aaaa}/{mm}/{dd}/{logType}.
         Lista os eventos de acesso (catraca) entre duas datas. Usa o bearer do
         AccessLog. Devolve lista (defensivo p/ variações de formato)."""
@@ -148,7 +148,7 @@ class DMPClient:
                                               timeout=40)
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": r2.status_code,
-                                              "resposta": (r2.text or "")[:500]})
+                                              "resposta": (r2.text or "")[:1200]})
                     except Exception as e2:
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": "ERRO", "resposta": str(e2)})

@@ -746,9 +746,10 @@ def remover_senha_loja(conn, loja_id):
 
 # ---- Fila FIFO de expedição (painel do operador) --------------------------
 
-def registrar_chegada(conn, loja_id, motoboy_id) -> bool:
+def registrar_chegada(conn, loja_id, motoboy_id, chegada_em=None) -> bool:
     """Coloca o motoboy na fila de expedição da loja (ordem = hora de chegada).
-    Não duplica: se já está aguardando nesta loja, devolve False."""
+    Não duplica: se já está aguardando nesta loja, devolve False. `chegada_em`
+    permite usar a hora do evento da catraca (senão usa agora, horário BR)."""
     ja = conn.execute(
         "SELECT id FROM fila_expedicao WHERE loja_id=? AND motoboy_id=? AND situacao='aguardando'",
         (loja_id, motoboy_id)).fetchone()
@@ -756,7 +757,7 @@ def registrar_chegada(conn, loja_id, motoboy_id) -> bool:
         return False
     conn.execute(
         "INSERT INTO fila_expedicao (loja_id, motoboy_id, chegada_em, situacao) "
-        "VALUES (?,?,?, 'aguardando')", (loja_id, motoboy_id, _agora_br()))
+        "VALUES (?,?,?, 'aguardando')", (loja_id, motoboy_id, chegada_em or _agora_br()))
     conn.commit()
     return True
 

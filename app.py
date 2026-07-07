@@ -2479,8 +2479,71 @@ def tela_financeiro(usuario):
 
 
 # ===========================================================================
-# Perfil Operador — fila / motos (esboço; depende dos eventos do DMP)
+# Perfil Operador — fila FIFO alimentada pelo AccessLog (catraca)
 # ===========================================================================
+
+def _cpf_do_evento(ev):
+    """CPF (só dígitos) de um evento do AccessLog."""
+    v = ev.get("PersonRegistrationNumber") or ev.get("Cpf") or ev.get("CredentialNumber")
+    if v is None:
+        return ""
+    return "".join(filter(str.isdigit, str(v).split(".")[0]))
+
+
+def _hora_do_evento(ev):
+    """Extrai a data/hora do evento (tenta vários nomes de campo). None se não achar."""
+    import re as _re
+    for k in ("AccessDate", "AccessDateTime", "EventDate", "EventDateTime", "Date",
+              "DateTime", "Data", "DataHora", "AccessHour", "Time", "Hora", "LogDate"):
+        v = ev.get(k)
+        if v:
+            m = _re.search(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?", str(v))
+            if m:
+                return (f"{m.group(1)}-{m.group(2)}-{m.group(3)} "
+                        f"{m.group(4)}:{m.group(5)}:{m.group(6) or '00'}")
+    return None
+
+
+def _sincronizar_fila_catraca(conn, loja_id, liberados):
+    """Lê os acessos de HOJE (AccessLog logType=0) e coloca na fila FIFO os
+    motoboys ATIVOS nesta loja que passaram na catraca — cada evento uma única
+    vez (marcado em acesso_eventos). Devolve (adicionados, erro)."""
+    ativos = {}
+    for r in liberados:
+        d = "".join(filter(str.isdigit, str(r["cpf"])))
+        if d:
+            ativos[d] = r["motoboy_id"]
+            ativos[d.lstrip("0")] = r["motoboy_id"]
+    if not ativos:
+        return 0, None
+    try:
+        eventos = dmp.ler_acessos_periodo(HOJE, HOJE, 0)
+    except Exception as e:
+        return 0, str(e)
+    add = 0
+    for ev in (eventos or []):
+        eid = ev.get("Id")
+        if eid is None:
+            continue
+        cpf = _cpf_do_evento(ev)
+        mb_id = ativos.get(cpf) or ativos.get(cpf.lstrip("0"))
+        if not mb_id:
+            continue  # não é motoboy ativo desta loja
+        # já processado nesta loja? (evita reentrar na fila após ser despachado)
+        if conn.execute("SELECT 1 FROM acesso_eventos WHERE dmp_pointer=? AND loja_id=?",
+                        (int(eid), loja_id)).fetchone():
+            continue
+        hora = _hora_do_evento(ev)
+        if db.registrar_chegada(conn, loja_id, mb_id, chegada_em=hora):
+            add += 1
+        conn.execute(
+            "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
+            "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
+            (mb_id, loja_id, cpf, ev.get("PersonName", ""), "acesso",
+             hora or "", int(eid)))
+    conn.commit()
+    return add, None
+
 
 def tela_operador(usuario):
     conn = db.conectar()
@@ -2533,8 +2596,6 @@ def tela_operador(usuario):
         return
 
     # ---- Dados da unidade -------------------------------------------------
-    fila = db.fila_aguardando(conn, loja_id)
-    n_disp = len(fila)
     liberados = conn.execute(
         "SELECT m.id AS motoboy_id, m.nome, m.cpf, o.nome AS ol, mol.placa, mol.tipo, "
         "       CASE WHEN m.foto_path IS NOT NULL THEN 'Sim' ELSE 'NÃO' END AS facial "
@@ -2544,6 +2605,18 @@ def tela_operador(usuario):
         "JOIN ols o        ON o.id = c.ol_id "
         "WHERE c.loja_id = ? AND c.situacao = 'ativo' "
         "ORDER BY m.nome", (loja_id,)).fetchall()
+
+    # Sincroniza a catraca (AccessLog) → fila FIFO, ao vivo. Roda no máx. 1x a cada
+    # 20s (não a cada clique) se o token do AccessLog estiver configurado.
+    import time as _tsync
+    _al_erro = None
+    if (not SIMULADO) and getattr(dmp, "nak_accesslog", ""):
+        if _tsync.time() - st.session_state.get("_ultimo_sync_al", 0) > 20:
+            st.session_state["_ultimo_sync_al"] = _tsync.time()
+            _add, _al_erro = _sincronizar_fila_catraca(conn, loja_id, liberados)
+
+    fila = db.fila_aguardando(conn, loja_id)
+    n_disp = len(fila)
 
     # ---- Topo: título (esquerda) + motos disponíveis (direita) ------------
     t_l, t_r = st.columns([3, 1])
@@ -2567,6 +2640,19 @@ def tela_operador(usuario):
     # 1) FILA FIFO DE EXPEDIÇÃO — parte principal
     # =======================================================================
     st.subheader("🔁 Fila de expedição — ordem de chegada")
+
+    if getattr(dmp, "nak_accesslog", "") and not SIMULADO:
+        cst1, cst2 = st.columns([3, 1])
+        cst1.caption("🟢 Fila **automática**: quem passa no reconhecimento facial "
+                     "da catraca entra aqui sozinho, na ordem de chegada.")
+        if cst2.button("🔄 Puxar da catraca", use_container_width=True, key="op_sync_al"):
+            st.session_state["_ultimo_sync_al"] = 0  # força sincronizar já
+            st.rerun()
+        if _al_erro:
+            st.warning(f"Não consegui ler a catraca agora: {_al_erro}")
+    else:
+        st.caption("Registre a chegada manualmente (a catraca automática ativa quando "
+                   "o token do AccessLog estiver configurado nos Secrets).")
 
     opcoes_ch = {f"{r['nome']} — {r['placa'] or 's/placa'}": r for r in liberados}
     if opcoes_ch:
