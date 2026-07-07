@@ -2967,8 +2967,10 @@ def tela_selfie():
         st.stop()
 
     if link["usado_em"]:
-        st.success(f"Foto já enviada em {link['usado_em'][:16]}. "
-                   "Seu reconhecimento facial já está cadastrado.")
+        st.success("✅ **Foto enviada com sucesso!** Seu reconhecimento facial já está "
+                   "cadastrado. **Pode fechar esta página.**")
+        if st.session_state.pop("_selfie_enviada", False):
+            st.balloons()
         st.stop()
 
     from datetime import date as _date
@@ -3020,6 +3022,9 @@ def tela_selfie():
         st.image(foto_bytes, caption="Foto capturada", use_container_width=True)
 
         if st.button("✅ Confirmar e enviar foto", type="primary"):
+            erro_envio = None
+            # O envio fica DENTRO do spinner; o sucesso/erro é mostrado FORA dele —
+            # assim o "Enviando..." some de verdade quando termina.
             with st.spinner("Enviando para o sistema..."):
                 try:
                     dmp.atualizar_foto(cpf, nome, foto_bytes)
@@ -3042,15 +3047,17 @@ def tela_selfie():
                         conn2.commit()
                     finally:
                         conn2.close()
-
-                    st.success("✅ Foto enviada com sucesso! "
-                               "Seu reconhecimento facial está ativo.")
-                    st.balloons()
-                    st.stop()
-
                 except Exception as ex:
-                    st.error(f"Erro ao enviar: {ex}")
-                    st.caption("Tente novamente ou entre em contato com sua empresa.")
+                    erro_envio = str(ex)
+
+            if erro_envio:
+                st.error(f"Erro ao enviar: {erro_envio}")
+                st.caption("Tente novamente ou entre em contato com sua empresa.")
+            else:
+                # Recarrega: no topo aparece SÓ a confirmação (sem câmera/botão/“enviando”),
+                # evitando o motoboy achar que não enviou e tentar de novo.
+                st.session_state["_selfie_enviada"] = True
+                st.rerun()
 
 
 # ===========================================================================
