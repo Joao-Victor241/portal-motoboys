@@ -1099,6 +1099,7 @@ def tela_ol(usuario):
                                         foto_mb = db.get_foto_selfie(conn, r["motoboy_id"])
                                         erro_dmp = None
                                         try:
+                                          with st.spinner("Ativando e enviando à leitora..."):
                                             dmp.vincular_face(r["cpf"], valido_ate=None)
                                             # situação permitida COM a foto → leva a
                                             # biometria (template) junto à leitora.
