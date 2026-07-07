@@ -1534,7 +1534,10 @@ def tela_admin(usuario):
                      f"{'✅ sim' if diag.get('tem_token') else '❌ NÃO (defina DMP_NAK_ACCESSLOG)'}")
             for p in diag.get("passos", []):
                 st.markdown(f"- **{p['passo']}** → status `{p['status']}`")
-                if p.get("resposta"):
+                if p.get("primeiro"):
+                    st.caption("Primeiro evento (todos os campos):")
+                    st.json(p["primeiro"])
+                elif p.get("resposta"):
                     st.code(p["resposta"], language=None)
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.

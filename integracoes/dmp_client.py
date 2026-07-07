@@ -116,6 +116,8 @@ class DMPClient:
                f"{data_ini.year}/{data_ini.month}/{data_ini.day}/"
                f"{data_fim.year}/{data_fim.month}/{data_fim.day}/{log_type}")
         r = self._sessao.get(url, headers=self._auth_accesslog(), timeout=40)
+        if r.status_code == 404:
+            return []          # 404 = sem registros no período (não é erro)
         r.raise_for_status()
         js = r.json()
         if isinstance(js, list):
@@ -146,9 +148,19 @@ class DMPClient:
                     try:
                         r2 = self._sessao.get(url, headers={"Authorization": f"Bearer {bearer}"},
                                               timeout=40)
+                        item = None
+                        if r2.status_code == 200:
+                            try:
+                                js = r2.json()
+                                arr = js if isinstance(js, list) else js.get(
+                                    "items", js.get("Items", []))
+                                item = arr[0] if arr else None
+                            except Exception:
+                                pass
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": r2.status_code,
-                                              "resposta": (r2.text or "")[:1200]})
+                                              "resposta": (r2.text or "")[:200],
+                                              "primeiro": item})
                     except Exception as e2:
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": "ERRO", "resposta": str(e2)})
