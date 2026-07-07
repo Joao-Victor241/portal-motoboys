@@ -1549,11 +1549,16 @@ def tela_admin(usuario):
             st.write(f"**Token AccessLog configurado:** "
                      f"{'✅ sim' if diag.get('tem_token') else '❌ NÃO (defina DMP_NAK_ACCESSLOG)'}")
             for p in diag.get("passos", []):
-                st.markdown(f"- **{p['passo']}** → status `{p['status']}`")
+                st.markdown(f"- **{p['passo']}** → status `{p['status']}` · "
+                            f"total no período: **{p.get('total', 0)}**")
                 if p.get("primeiro"):
-                    st.caption("Primeiro acesso do período (campos — veja o EquipmentNumber):")
+                    st.caption("Acesso MAIS ANTIGO do período (veja o EquipmentNumber):")
                     st.json(p["primeiro"])
-                elif p.get("resposta"):
+                if p.get("ultimo"):
+                    st.caption("Acesso MAIS RECENTE do período (aqui deve aparecer sua "
+                               "última passada — confira o Id e o AccessDateTime):")
+                    st.json(p["ultimo"])
+                if not p.get("primeiro") and p.get("resposta"):
                     st.code(p["resposta"], language=None)
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
@@ -2523,7 +2528,7 @@ def _hora_do_evento(ev):
     return None
 
 
-def _sincronizar_fila_catraca(conn):
+def _sincronizar_fila_catraca(conn, forcar=False):
     """Sincroniza a fila FIFO com a catraca (AccessLog logType=0), de forma GLOBAL:
       - lê uma janela ampla (robusto a relógio da leitora) e usa o `Id` do acesso
         para processar só o que é NOVO (acesso_estado.ultimo_pointer = maior Id já visto);
@@ -2546,35 +2551,43 @@ def _sincronizar_fila_catraca(conn):
     max_id = max(ids)
     est = conn.execute("SELECT ultimo_pointer FROM acesso_estado WHERE id=1").fetchone()
     ultimo = (est["ultimo_pointer"] if est else 0) or 0
-    if ultimo == 0:
+    if ultimo == 0 and not forcar:
         # Linha de base: passa a contar a partir de agora (ignora o histórico).
         conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1", (max_id,))
         conn.commit()
-        return {"lido": len(eventos), "add": 0, "baseline": True}
+        return {"lido": len(eventos), "add": 0, "baseline": True, "max_id": max_id}
 
-    add = 0
+    corte = 0 if forcar else ultimo      # forçar = processa tudo (teste)
+    add = novos = com_catraca = com_ativo = 0
+    equips_vistos = set()
     for ev in eventos:
         eid = int(ev.get("Id") or 0)
-        if eid <= ultimo:
+        if eid <= corte:
             continue                     # já processado
-        cpf = _cpf_do_evento(ev)
+        novos += 1
         equip = str(ev.get("EquipmentNumber") or "").strip()
+        equips_vistos.add(equip)
+        cpf = _cpf_do_evento(ev)
         loja_id = emap.get(equip)
         if not cpf or not loja_id:
             continue                     # sem CPF ou catraca não mapeada a uma loja
+        com_catraca += 1
         mb = conn.execute(
             "SELECT c.motoboy_id FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
             "WHERE c.loja_id=? AND c.situacao='ativo' AND (m.cpf=? OR m.cpf=?) LIMIT 1",
             (loja_id, cpf, cpf.lstrip("0"))).fetchone()
         if not mb:
             continue                     # não é motoboy ativo na loja daquela catraca
+        com_ativo += 1
         if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
                                 chegada_em=_hora_do_evento(ev)):
             add += 1
     conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1",
                  (max(ultimo, max_id),))
     conn.commit()
-    return {"lido": len(eventos), "add": add}
+    return {"lido": len(eventos), "novos": novos, "com_catraca": com_catraca,
+            "com_ativo": com_ativo, "add": add, "ultimo": ultimo, "max_id": max_id,
+            "equips": ",".join(sorted(e for e in equips_vistos if e))}
 
 
 def tela_operador(usuario):
@@ -2692,6 +2705,20 @@ def tela_operador(usuario):
                     "agora**. Passe na leitora e o motoboy aparece aqui.")
         elif "lido" in _res:
             st.caption(f"🔎 Catraca conectada · {_res['lido']} acesso(s) recentes lidos.")
+
+        with st.expander("🔧 Detalhes da sincronização (debug)"):
+            st.caption(f"Catraca(s) vinculada(s) a esta loja: "
+                       f"**{db.get_equip_loja(conn, loja_id) or '— nenhuma'}**")
+            if _res:
+                st.json(_res)
+                st.caption("novos = acessos com Id maior que a base · com_catraca = bateram "
+                           "numa catraca vinculada · com_ativo = motoboy ativo na loja da "
+                           "catraca · add = entraram na fila · equips = nº de catraca vistos "
+                           "nos acessos novos.")
+            if st.button("🧪 Processar acessos existentes (teste)", key="al_forcar"):
+                res2 = _sincronizar_fila_catraca(conn, forcar=True)
+                st.session_state["_al_res"] = res2
+                st.rerun()
 
     from datetime import timezone as _tz
     _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)

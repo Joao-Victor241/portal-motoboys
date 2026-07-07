@@ -148,19 +148,23 @@ class DMPClient:
                     try:
                         r2 = self._sessao.get(url, headers={"Authorization": f"Bearer {bearer}"},
                                               timeout=40)
-                        item = None
+                        item = item_ult = None
+                        total = 0
                         if r2.status_code == 200:
                             try:
                                 js = r2.json()
                                 arr = js if isinstance(js, list) else js.get(
                                     "items", js.get("Items", []))
+                                total = len(arr)
                                 item = arr[0] if arr else None
+                                item_ult = arr[-1] if arr else None
                             except Exception:
                                 pass
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": r2.status_code,
-                                              "resposta": (r2.text or "")[:200],
-                                              "primeiro": item})
+                                              "resposta": (r2.text or "")[:150],
+                                              "total": total, "primeiro": item,
+                                              "ultimo": item_ult})
                     except Exception as e2:
                         out["passos"].append({"passo": f"AccessLog logType={lt}",
                                               "status": "ERRO", "resposta": str(e2)})
