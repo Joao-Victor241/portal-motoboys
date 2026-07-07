@@ -2510,21 +2510,23 @@ def _hora_do_evento(ev):
 def _sincronizar_fila_catraca(conn, loja_id, liberados):
     """Lê os acessos de HOJE (AccessLog logType=0) e coloca na fila FIFO os
     motoboys ATIVOS nesta loja que passaram na catraca — cada evento uma única
-    vez (marcado em acesso_eventos). Devolve (adicionados, erro)."""
+    vez (marcado em acesso_eventos). Devolve (adicionados, total_lido, erro)."""
+    from datetime import timezone as _tz
+    hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()   # data de Brasília
     ativos = {}
     for r in liberados:
         d = "".join(filter(str.isdigit, str(r["cpf"])))
         if d:
             ativos[d] = r["motoboy_id"]
             ativos[d.lstrip("0")] = r["motoboy_id"]
-    if not ativos:
-        return 0, None
     try:
-        eventos = dmp.ler_acessos_periodo(HOJE, HOJE, 0)
+        eventos = dmp.ler_acessos_periodo(hoje_br, hoje_br, 0) or []
     except Exception as e:
-        return 0, str(e)
+        return 0, 0, str(e)
+    if not ativos:
+        return 0, len(eventos), None
     add = 0
-    for ev in (eventos or []):
+    for ev in eventos:
         eid = ev.get("Id")
         if eid is None:
             continue
@@ -2545,7 +2547,7 @@ def _sincronizar_fila_catraca(conn, loja_id, liberados):
             (mb_id, loja_id, cpf, ev.get("PersonName", ""), "acesso",
              hora or "", int(eid)))
     conn.commit()
-    return add, None
+    return add, len(eventos), None
 
 
 def tela_operador(usuario):
@@ -2616,7 +2618,8 @@ def tela_operador(usuario):
     if (not SIMULADO) and getattr(dmp, "nak_accesslog", ""):
         if _tsync.time() - st.session_state.get("_ultimo_sync_al", 0) > 20:
             st.session_state["_ultimo_sync_al"] = _tsync.time()
-            _add, _al_erro = _sincronizar_fila_catraca(conn, loja_id, liberados)
+            _add, _tot, _al_erro = _sincronizar_fila_catraca(conn, loja_id, liberados)
+            st.session_state["_al_lido"] = _tot
 
     fila = db.fila_aguardando(conn, loja_id)
     n_disp = len(fila)
@@ -2653,6 +2656,11 @@ def tela_operador(usuario):
             st.rerun()
         if _al_erro:
             st.warning(f"Não consegui ler a catraca agora: {_al_erro}")
+        else:
+            _lido = st.session_state.get("_al_lido")
+            if _lido is not None:
+                st.caption(f"🔎 Última leitura da catraca: **{_lido}** acesso(s) hoje. "
+                           "Só entram na fila os que estão **ativos nesta loja**.")
     else:
         st.caption("Registre a chegada manualmente (a catraca automática ativa quando "
                    "o token do AccessLog estiver configurado nos Secrets).")
