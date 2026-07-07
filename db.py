@@ -744,6 +744,32 @@ def remover_senha_loja(conn, loja_id):
     conn.commit()
 
 
+# ---- Mapa catraca/equipamento (EquipmentNumber do DMP) -> loja -------------
+
+def set_equip_loja(conn, loja_id, equipamentos):
+    """Define quais catracas (EquipmentNumber) pertencem a esta loja.
+    Aceita vários separados por vírgula."""
+    set_config(conn, f"equip_loja_{loja_id}", (equipamentos or "").strip())
+    conn.commit()
+
+
+def get_equip_loja(conn, loja_id):
+    return get_config(conn, f"equip_loja_{loja_id}", "") or ""
+
+
+def mapa_equip_loja(conn):
+    """{EquipmentNumber(str): loja_id} — usado para rotear o acesso da catraca
+    para a fila da unidade certa."""
+    m = {}
+    for lj in conn.execute("SELECT id FROM lojas").fetchall():
+        v = get_config(conn, f"equip_loja_{lj['id']}", "") or ""
+        for e in v.replace(";", ",").split(","):
+            e = e.strip()
+            if e:
+                m[e] = lj["id"]
+    return m
+
+
 # ---- Fila FIFO de expedição (painel do operador) --------------------------
 
 def registrar_chegada(conn, loja_id, motoboy_id, chegada_em=None) -> bool:

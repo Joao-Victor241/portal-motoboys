@@ -1518,12 +1518,28 @@ def tela_admin(usuario):
                 except Exception as _e:
                     st.error(f"Erro no diagnóstico: {_e}")
 
-    with st.expander("🛰️ Diagnóstico do AccessLog (catraca ao vivo)"):
-        st.caption("Testa a leitura dos acessos da catraca com o token do AccessLog. "
-                   "Defina **DMP_NAK_ACCESSLOG** nos Secrets primeiro. Me mande o "
-                   "resultado para eu ligar a fila FIFO automática.")
-        st.caption("Dica: escolha um intervalo em que **houve acessos** na catraca "
-                   "(ex.: os últimos 7 dias). O teste varre vários logTypes.")
+    with st.expander("🛰️ AccessLog / catracas (fila automática por unidade)"):
+        st.markdown("**Vincular cada catraca à sua unidade**")
+        st.caption("O acesso na catraca vem com um **número de equipamento** "
+                   "(EquipmentNumber). Informe aqui qual catraca pertence a cada loja — "
+                   "assim o motoboy que passar entra na fila da **unidade certa**. "
+                   "Para ver o número, use o diagnóstico abaixo (campo EquipmentNumber). "
+                   "Vários números na mesma loja: separe por vírgula.")
+        for _lj in conn.execute("SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall():
+            eq_atual = db.get_equip_loja(conn, _lj["id"])
+            e1, e2 = st.columns([3, 2])
+            e1.markdown(f"**{_lj['nome']}**")
+            _novo_eq = e2.text_input("Nº da catraca", value=eq_atual,
+                                     key=f"equip_{_lj['id']}", label_visibility="collapsed",
+                                     placeholder="ex.: 9991")
+            if _novo_eq != eq_atual:
+                db.set_equip_loja(conn, _lj["id"], _novo_eq)
+                st.toast(f"Catraca vinculada a {_lj['nome']}.")
+
+        st.divider()
+        st.markdown("**Diagnóstico do AccessLog**")
+        st.caption("Testa a leitura ao vivo (usa o **logType 0** — acessos concedidos). "
+                   "Precisa da variável `DMP_NAK_ACCESSLOG` nos Secrets.")
         alc1, alc2 = st.columns(2)
         _al_di = alc1.date_input("De", value=HOJE - timedelta(days=7),
                                  key="al_di", format="DD/MM/YYYY")
@@ -1535,7 +1551,7 @@ def tela_admin(usuario):
             for p in diag.get("passos", []):
                 st.markdown(f"- **{p['passo']}** → status `{p['status']}`")
                 if p.get("primeiro"):
-                    st.caption("Primeiro evento (todos os campos):")
+                    st.caption("Primeiro acesso do período (campos — veja o EquipmentNumber):")
                     st.json(p["primeiro"])
                 elif p.get("resposta"):
                     st.code(p["resposta"], language=None)
@@ -2507,47 +2523,58 @@ def _hora_do_evento(ev):
     return None
 
 
-def _sincronizar_fila_catraca(conn, loja_id, liberados):
-    """Lê os acessos de HOJE (AccessLog logType=0) e coloca na fila FIFO os
-    motoboys ATIVOS nesta loja que passaram na catraca — cada evento uma única
-    vez (marcado em acesso_eventos). Devolve (adicionados, total_lido, erro)."""
+def _sincronizar_fila_catraca(conn):
+    """Sincroniza a fila FIFO com a catraca (AccessLog logType=0), de forma GLOBAL:
+      - lê uma janela ampla (robusto a relógio da leitora) e usa o `Id` do acesso
+        para processar só o que é NOVO (acesso_estado.ultimo_pointer = maior Id já visto);
+      - na 1ª vez estabelece uma LINHA DE BASE (não importa histórico — a fila começa
+        a valer a partir de agora);
+      - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA, e só coloca na fila
+        se o motoboy estiver ATIVO naquela loja.
+    Devolve dict com {lido, add, baseline, erro}."""
     from datetime import timezone as _tz
-    hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()   # data de Brasília
-    ativos = {}
-    for r in liberados:
-        d = "".join(filter(str.isdigit, str(r["cpf"])))
-        if d:
-            ativos[d] = r["motoboy_id"]
-            ativos[d.lstrip("0")] = r["motoboy_id"]
+    hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()
+    d_ini = hoje_br - timedelta(days=7)      # janela ampla (tolera relógio da leitora)
+    emap = db.mapa_equip_loja(conn)
     try:
-        eventos = dmp.ler_acessos_periodo(hoje_br, hoje_br, 0) or []
+        eventos = dmp.ler_acessos_periodo(d_ini, hoje_br, 0) or []
     except Exception as e:
-        return 0, 0, str(e)
-    if not ativos:
-        return 0, len(eventos), None
+        return {"lido": 0, "add": 0, "erro": str(e)}
+    ids = [int(ev["Id"]) for ev in eventos if ev.get("Id") is not None]
+    if not ids:
+        return {"lido": 0, "add": 0}
+    max_id = max(ids)
+    est = conn.execute("SELECT ultimo_pointer FROM acesso_estado WHERE id=1").fetchone()
+    ultimo = (est["ultimo_pointer"] if est else 0) or 0
+    if ultimo == 0:
+        # Linha de base: passa a contar a partir de agora (ignora o histórico).
+        conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1", (max_id,))
+        conn.commit()
+        return {"lido": len(eventos), "add": 0, "baseline": True}
+
     add = 0
     for ev in eventos:
-        eid = ev.get("Id")
-        if eid is None:
-            continue
+        eid = int(ev.get("Id") or 0)
+        if eid <= ultimo:
+            continue                     # já processado
         cpf = _cpf_do_evento(ev)
-        mb_id = ativos.get(cpf) or ativos.get(cpf.lstrip("0"))
-        if not mb_id:
-            continue  # não é motoboy ativo desta loja
-        # já processado nesta loja? (evita reentrar na fila após ser despachado)
-        if conn.execute("SELECT 1 FROM acesso_eventos WHERE dmp_pointer=? AND loja_id=?",
-                        (int(eid), loja_id)).fetchone():
-            continue
-        hora = _hora_do_evento(ev)
-        if db.registrar_chegada(conn, loja_id, mb_id, chegada_em=hora):
+        equip = str(ev.get("EquipmentNumber") or "").strip()
+        loja_id = emap.get(equip)
+        if not cpf or not loja_id:
+            continue                     # sem CPF ou catraca não mapeada a uma loja
+        mb = conn.execute(
+            "SELECT c.motoboy_id FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
+            "WHERE c.loja_id=? AND c.situacao='ativo' AND (m.cpf=? OR m.cpf=?) LIMIT 1",
+            (loja_id, cpf, cpf.lstrip("0"))).fetchone()
+        if not mb:
+            continue                     # não é motoboy ativo na loja daquela catraca
+        if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
+                                chegada_em=_hora_do_evento(ev)):
             add += 1
-        conn.execute(
-            "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
-            "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
-            (mb_id, loja_id, cpf, ev.get("PersonName", ""), "acesso",
-             hora or "", int(eid)))
+    conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1",
+                 (max(ultimo, max_id),))
     conn.commit()
-    return add, len(eventos), None
+    return {"lido": len(eventos), "add": add}
 
 
 def tela_operador(usuario):
@@ -2611,15 +2638,12 @@ def tela_operador(usuario):
         "WHERE c.loja_id = ? AND c.situacao = 'ativo' "
         "ORDER BY m.nome", (loja_id,)).fetchall()
 
-    # Sincroniza a catraca (AccessLog) → fila FIFO, ao vivo. Roda no máx. 1x a cada
-    # 20s (não a cada clique) se o token do AccessLog estiver configurado.
+    # Sincroniza a catraca (AccessLog) → fila FIFO, ao vivo (global, no máx. 1x/15s).
     import time as _tsync
-    _al_erro = None
     if (not SIMULADO) and getattr(dmp, "nak_accesslog", ""):
-        if _tsync.time() - st.session_state.get("_ultimo_sync_al", 0) > 20:
+        if _tsync.time() - st.session_state.get("_ultimo_sync_al", 0) > 15:
             st.session_state["_ultimo_sync_al"] = _tsync.time()
-            _add, _tot, _al_erro = _sincronizar_fila_catraca(conn, loja_id, liberados)
-            st.session_state["_al_lido"] = _tot
+            st.session_state["_al_res"] = _sincronizar_fila_catraca(conn)
 
     fila = db.fila_aguardando(conn, loja_id)
     n_disp = len(fila)
@@ -2647,41 +2671,27 @@ def tela_operador(usuario):
     # =======================================================================
     st.subheader("🔁 Fila de expedição — ordem de chegada")
 
-    if getattr(dmp, "nak_accesslog", "") and not SIMULADO:
+    _res = st.session_state.get("_al_res") or {}
+    if (not getattr(dmp, "nak_accesslog", "")) or SIMULADO:
+        st.warning("A fila automática precisa do **AccessLog** configurado "
+                   "(variável `DMP_NAK_ACCESSLOG` nos Secrets).")
+    else:
         cst1, cst2 = st.columns([3, 1])
-        cst1.caption("🟢 Fila **automática**: quem passa no reconhecimento facial "
-                     "da catraca entra aqui sozinho, na ordem de chegada.")
+        cst1.caption("🟢 **Fila automática:** quem passa no reconhecimento facial da "
+                     "catraca entra aqui sozinho, na ordem de chegada.")
         if cst2.button("🔄 Puxar da catraca", use_container_width=True, key="op_sync_al"):
-            st.session_state["_ultimo_sync_al"] = 0  # força sincronizar já
+            st.session_state["_ultimo_sync_al"] = 0   # força sincronizar já
             st.rerun()
-        if _al_erro:
-            st.warning(f"Não consegui ler a catraca agora: {_al_erro}")
-        else:
-            _lido = st.session_state.get("_al_lido")
-            if _lido is not None:
-                st.caption(f"🔎 Última leitura da catraca: **{_lido}** acesso(s) hoje. "
-                           "Só entram na fila os que estão **ativos nesta loja**.")
-    else:
-        st.caption("Registre a chegada manualmente (a catraca automática ativa quando "
-                   "o token do AccessLog estiver configurado nos Secrets).")
-
-    opcoes_ch = {f"{r['nome']} — {r['placa'] or 's/placa'}": r for r in liberados}
-    if opcoes_ch:
-        ch1, ch2 = st.columns([3, 1])
-        with ch1:
-            sel_ch = st.selectbox("Motoboy que chegou à expedição",
-                                  list(opcoes_ch.keys()), key="fila_chegou",
-                                  label_visibility="collapsed")
-        with ch2:
-            if st.button("✅ Registrar chegada", type="primary", use_container_width=True):
-                rc = opcoes_ch[sel_ch]
-                if db.registrar_chegada(conn, loja_id, rc["motoboy_id"]):
-                    st.toast(f"Chegada registrada: {rc['nome']}")
-                else:
-                    st.toast("Esse motoboy já está na fila.")
-                st.rerun()
-    else:
-        st.info("Nenhum motoboy liberado nesta loja para entrar na fila.")
+        if not db.get_equip_loja(conn, loja_id):
+            st.warning("⚠️ Esta loja ainda **não tem catraca vinculada**. Peça ao admin "
+                       "para vincular em **Administração → 🛰️ AccessLog / catracas**.")
+        elif _res.get("erro"):
+            st.warning(f"Não consegui ler a catraca: {_res['erro']}")
+        elif _res.get("baseline"):
+            st.info("Catraca conectada ✅ — a fila registra os acessos **a partir de "
+                    "agora**. Passe na leitora e o motoboy aparece aqui.")
+        elif "lido" in _res:
+            st.caption(f"🔎 Catraca conectada · {_res['lido']} acesso(s) recentes lidos.")
 
     from datetime import timezone as _tz
     _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)

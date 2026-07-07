@@ -124,9 +124,9 @@ class DMPClient:
             return js
         return js.get("items", js.get("Items", [])) if isinstance(js, dict) else []
 
-    def diagnostico_accesslog(self, data_ini, data_fim, log_types=(0, 1, 2, 3, 4, 5, 6)) -> dict:
-        """Testa logon + leitura do AccessLog VARRENDO vários logTypes (um único
-        logon), para descobrir qual devolve dados. Devolve status/resposta de cada."""
+    def diagnostico_accesslog(self, data_ini, data_fim, log_types=(0,)) -> dict:
+        """Testa logon + leitura do AccessLog (logType 0 = acessos concedidos).
+        Devolve status/resposta e o primeiro evento (para ver os campos)."""
         out = {"tem_token": bool(self.nak_accesslog), "passos": []}
         if self.simulado:
             out["passos"].append({"passo": "modo simulado", "status": "-", "resposta": ""})
