@@ -954,12 +954,28 @@ def garantir_tabelas_prestacao(conn):
     Roda só UMA vez por processo (evita DDL a cada abertura de tela — deixa o app
     muito mais rápido no PostgreSQL, onde cada comando é uma ida ao servidor)."""
     global _TABELAS_PRESTACAO_OK
-    if _TABELAS_PRESTACAO_OK:
-        return
     pg = usando_pg()
     serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    blob = "BYTEA" if pg else "BLOB"
     ts = "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')" if pg else "CURRENT_TIMESTAMP"
+    # Tabelas independentes (justificativas de não envio + mensagens à OL): SEMPRE
+    # garante (CREATE IF NOT EXISTS é barato/idempotente) — robusto quando o app
+    # recarrega o código sem recriar o schema (evita UndefinedTable).
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS prestacao_justificativas ("
+        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT NOT NULL,"
+        f" motoboy_id INTEGER, tipo TEXT NOT NULL, texto TEXT,"
+        f" status TEXT NOT NULL DEFAULT 'pendente', motivo_reprovacao TEXT,"
+        f" criado_por INTEGER, decidido_por INTEGER, decidido_em TEXT,"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS mensagens_ol ("
+        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT, texto TEXT NOT NULL,"
+        f" lido INTEGER NOT NULL DEFAULT 0, criado_por INTEGER,"
+        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    conn.commit()
+    if _TABELAS_PRESTACAO_OK:
+        return
+    blob = "BYTEA" if pg else "BLOB"
     valor_tipo = "NUMERIC(12,2)" if pg else "REAL"
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS prestacao_documentos ("
@@ -978,20 +994,7 @@ def garantir_tabelas_prestacao(conn):
         f" id {serial}, documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),"
         f" nome_arquivo TEXT, mime TEXT, arquivo {blob})")
     conn.execute("CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT)")
-    # Justificativas de NÃO envio (OL) — aprovadas/reprovadas pelo financeiro.
-    conn.execute(
-        f"CREATE TABLE IF NOT EXISTS prestacao_justificativas ("
-        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT NOT NULL,"
-        f" motoboy_id INTEGER, tipo TEXT NOT NULL, texto TEXT,"
-        f" status TEXT NOT NULL DEFAULT 'pendente', motivo_reprovacao TEXT,"
-        f" criado_por INTEGER, decidido_por INTEGER, decidido_em TEXT,"
-        f" criado_em TEXT NOT NULL DEFAULT {ts})")
-    # Mensagens/avisos do admin para uma OL (aparecem no portal da OL).
-    conn.execute(
-        f"CREATE TABLE IF NOT EXISTS mensagens_ol ("
-        f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT, texto TEXT NOT NULL,"
-        f" lido INTEGER NOT NULL DEFAULT 0, criado_por INTEGER,"
-        f" criado_em TEXT NOT NULL DEFAULT {ts})")
+    # (prestacao_justificativas e mensagens_ol já são criadas no topo desta função.)
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
     # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
     _cols_valores = [("tipo", "TEXT")]
