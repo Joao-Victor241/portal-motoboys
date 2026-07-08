@@ -14,7 +14,7 @@ Usuários: admin / ol_exemplo / operador. Senhas vêm dos Secrets/.env
 nos fallbacks de desenvolvimento.
 """
 
-# build: painel operador + senha por loja + biometria na situacao (redeploy limpo v2)
+# build: fluxo de conferencia de prestacao (justificativas, mensagens) - redeploy limpo v3
 import os
 import uuid
 from datetime import date, datetime, timedelta
