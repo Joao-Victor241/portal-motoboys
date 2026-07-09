@@ -758,11 +758,34 @@ def get_equip_loja(conn, loja_id):
 
 
 def mapa_equip_loja(conn):
-    """{EquipmentNumber(str): loja_id} — usado para rotear o acesso da catraca
-    para a fila da unidade certa."""
+    """{EquipmentNumber(str): loja_id} das catracas de ENTRADA — usado para
+    rotear o acesso e colocar o motoboy na fila da unidade certa."""
     m = {}
     for lj in conn.execute("SELECT id FROM lojas").fetchall():
         v = get_config(conn, f"equip_loja_{lj['id']}", "") or ""
+        for e in v.replace(";", ",").split(","):
+            e = e.strip()
+            if e:
+                m[e] = lj["id"]
+    return m
+
+
+def set_equip_saida(conn, loja_id, equipamentos):
+    """Define quais catracas (EquipmentNumber) são de SAÍDA desta loja.
+    Ao passar numa catraca de saída, o motoboy sai da fila."""
+    set_config(conn, f"equip_saida_{loja_id}", (equipamentos or "").strip())
+    conn.commit()
+
+
+def get_equip_saida(conn, loja_id):
+    return get_config(conn, f"equip_saida_{loja_id}", "") or ""
+
+
+def mapa_equip_saida(conn):
+    """{EquipmentNumber(str): loja_id} das catracas de SAÍDA."""
+    m = {}
+    for lj in conn.execute("SELECT id FROM lojas").fetchall():
+        v = get_config(conn, f"equip_saida_{lj['id']}", "") or ""
         for e in v.replace(";", ",").split(","):
             e = e.strip()
             if e:
@@ -908,6 +931,22 @@ def remover_fila(conn, fila_id):
     """Remove o motoboy da fila sem despachar (ex.: saiu, engano)."""
     conn.execute("DELETE FROM fila_expedicao WHERE id=?", (fila_id,))
     conn.commit()
+
+
+def sair_da_fila(conn, loja_id, motoboy_id) -> bool:
+    """Motoboy saiu pela catraca de saída: se estiver aguardando nesta loja,
+    marca como despachado (saiu com o pedido). Devolve True se removeu alguém.
+    Quando ele voltar e passar na entrada, reentra na fila (evento novo)."""
+    row = conn.execute(
+        "SELECT id FROM fila_expedicao WHERE loja_id=? AND motoboy_id=? "
+        "AND situacao='aguardando' ORDER BY chegada_em ASC, id ASC LIMIT 1",
+        (loja_id, motoboy_id)).fetchone()
+    if not row:
+        return False
+    conn.execute("UPDATE fila_expedicao SET situacao='despachado', despachado_em=? WHERE id=?",
+                 (_agora_br(), row["id"]))
+    conn.commit()
+    return True
 
 
 def despachados_recentes(conn, loja_id, limite=10):

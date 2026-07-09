@@ -1615,22 +1615,35 @@ def tela_admin(usuario):
                     st.error(f"Erro no diagnóstico: {_e}")
 
     with st.expander("🛰️ AccessLog / catracas (fila automática por unidade)"):
-        st.markdown("**Vincular cada catraca à sua unidade**")
-        st.caption("O acesso na catraca vem com um **número de equipamento** "
-                   "(EquipmentNumber). Informe aqui qual catraca pertence a cada loja — "
-                   "assim o motoboy que passar entra na fila da **unidade certa**. "
-                   "Para ver o número, use o diagnóstico abaixo (campo EquipmentNumber). "
-                   "Vários números na mesma loja: separe por vírgula.")
+        st.markdown("**Vincular as catracas de cada unidade**")
+        st.caption("Cada acesso na catraca traz um **número de equipamento** "
+                   "(EquipmentNumber). Informe qual catraca é de **entrada** e qual é de "
+                   "**saída** em cada loja. Quem passa na **entrada** entra na fila da "
+                   "unidade; quem passa na **saída** sai da fila (saiu com o pedido) — e "
+                   "quando volta e passa na entrada de novo, **reentra na fila**. "
+                   "Enquanto só houver uma leitora, preencha só a **entrada**: aí o motoboy "
+                   "sai da fila pelo botão do operador e reentra ao passar de novo. "
+                   "Para ver o número, use o diagnóstico abaixo. Vários na mesma loja: "
+                   "separe por vírgula.")
+        ce, cs, _ = st.columns([2, 2, 2])
+        ce.caption("**Entrada**"); cs.caption("**Saída**")
         for _lj in conn.execute("SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall():
-            eq_atual = db.get_equip_loja(conn, _lj["id"])
-            e1, e2 = st.columns([3, 2])
-            e1.markdown(f"**{_lj['nome']}**")
-            _novo_eq = e2.text_input("Nº da catraca", value=eq_atual,
+            eq_in = db.get_equip_loja(conn, _lj["id"])
+            eq_out = db.get_equip_saida(conn, _lj["id"])
+            e0, e1, e2 = st.columns([2, 2, 2])
+            e0.markdown(f"**{_lj['nome']}**")
+            _novo_in = e1.text_input("Entrada", value=eq_in,
                                      key=f"equip_{_lj['id']}", label_visibility="collapsed",
-                                     placeholder="ex.: 9991")
-            if _novo_eq != eq_atual:
-                db.set_equip_loja(conn, _lj["id"], _novo_eq)
-                st.toast(f"Catraca vinculada a {_lj['nome']}.")
+                                     placeholder="entrada · ex.: 9991")
+            _novo_out = e2.text_input("Saída", value=eq_out,
+                                      key=f"equipout_{_lj['id']}", label_visibility="collapsed",
+                                      placeholder="saída · ex.: 9992")
+            if _novo_in != eq_in:
+                db.set_equip_loja(conn, _lj["id"], _novo_in)
+                st.toast(f"Catraca de entrada vinculada a {_lj['nome']}.")
+            if _novo_out != eq_out:
+                db.set_equip_saida(conn, _lj["id"], _novo_out)
+                st.toast(f"Catraca de saída vinculada a {_lj['nome']}.")
 
         st.divider()
         st.markdown("**Diagnóstico do AccessLog**")
@@ -2730,22 +2743,25 @@ def _hora_do_evento(ev):
 
 
 def _sincronizar_fila_catraca(conn, forcar=False):
-    """Sincroniza a fila FIFO com a catraca (AccessLog logType=0):
+    """Sincroniza a fila FIFO com as catracas (AccessLog logType=0):
       - lê uma janela de 7 dias (robusto ao relógio da leitora);
       - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA;
-      - só coloca na fila motoboy ATIVO naquela loja;
-      - cada acesso entra UMA vez (marcado em acesso_eventos por Id+loja): não
-        duplica, não reentra após ser despachado, e o "puxar" pode reprocessar.
-    Devolve dict de depuração {lido, com_catraca, com_ativo, add, equips, status}."""
+      - catraca de ENTRADA: coloca o motoboy ativo na fila da loja;
+      - catraca de SAÍDA: tira o motoboy da fila (saiu com o pedido);
+      - cada acesso é processado UMA vez (marcado em acesso_eventos por Id+loja):
+        não duplica, e cada passagem física (Id novo) conta — por isso, ao voltar
+        e passar de novo na entrada, o motoboy REENTRA na fila.
+    Devolve dict de depuração {lido, com_catraca, com_ativo, add, sai, equips, status}."""
     from datetime import timezone as _tz
     hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()
     d_ini = hoje_br - timedelta(days=7)      # janela ampla (tolera relógio da leitora)
-    emap = db.mapa_equip_loja(conn)
+    emap_in = db.mapa_equip_loja(conn)       # catracas de entrada
+    emap_out = db.mapa_equip_saida(conn)     # catracas de saída
     try:
         eventos = dmp.ler_acessos_periodo(d_ini, hoje_br, 0) or []
     except Exception as e:
         return {"lido": 0, "add": 0, "erro": str(e)}
-    add = com_catraca = com_ativo = 0
+    add = sai = com_catraca = com_ativo = 0
     equips_vistos = set()
     status_vistos = {}
     for ev in eventos:
@@ -2757,11 +2773,12 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         equips_vistos.add(equip)
         _stt = ev.get("AccessValidationStatus")
         status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
-        loja_id = emap.get(equip)
+        eh_saida = equip in emap_out
+        loja_id = emap_out.get(equip) if eh_saida else emap_in.get(equip)
         if not loja_id:
-            continue                     # catraca não vinculada a uma loja
+            continue                     # catraca não vinculada a nenhuma loja
         com_catraca += 1
-        # Já processado nesta loja? (evita duplicar e reentrar após despachar)
+        # Já processado nesta loja? (cada passagem = 1 vez; Id novo reentra)
         if conn.execute("SELECT 1 FROM acesso_eventos WHERE dmp_pointer=? AND loja_id=?",
                         (eid, loja_id)).fetchone():
             continue
@@ -2773,17 +2790,24 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         if not mb:
             continue                     # não é motoboy ativo na loja daquela catraca
         com_ativo += 1
-        if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
-                                chegada_em=_hora_do_evento(ev)):
-            add += 1
+        if eh_saida:                     # passou na SAÍDA → tira da fila
+            if db.sair_da_fila(conn, loja_id, mb["motoboy_id"]):
+                sai += 1
+            _tipo = "saida"
+        else:                            # passou na ENTRADA → entra na fila
+            if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
+                                    chegada_em=_hora_do_evento(ev)):
+                add += 1
+            _tipo = "entrada"
         conn.execute(
             "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
             "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
-            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), "acesso",
+            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), _tipo,
              _hora_do_evento(ev) or "", eid))
     conn.commit()
     return {"lido": len(eventos), "com_catraca": com_catraca, "com_ativo": com_ativo,
-            "add": add, "equips": ",".join(sorted(e for e in equips_vistos if e)),
+            "add": add, "sai": sai,
+            "equips": ",".join(sorted(e for e in equips_vistos if e)),
             "status": status_vistos}
 
 
@@ -2892,7 +2916,9 @@ def tela_operador(usuario):
         if cst2.button("🔄 Puxar da catraca", use_container_width=True, key="op_sync_al"):
             st.session_state["_ultimo_sync_al"] = 0   # força sincronizar já
             st.rerun()
-        if not db.get_equip_loja(conn, loja_id):
+        _eq_in = db.get_equip_loja(conn, loja_id)
+        _eq_out = db.get_equip_saida(conn, loja_id)
+        if not _eq_in and not _eq_out:
             st.warning("⚠️ Esta loja ainda **não tem catraca vinculada**. Peça ao admin "
                        "para vincular em **Administração → 🛰️ AccessLog / catracas**.")
         elif _res.get("erro"):
@@ -2901,14 +2927,14 @@ def tela_operador(usuario):
             st.caption(f"🔎 Catraca conectada · {_res['lido']} acesso(s) recentes lidos.")
 
         with st.expander("🔧 Detalhes da sincronização (debug)"):
-            st.caption(f"Catraca(s) vinculada(s) a esta loja: "
-                       f"**{db.get_equip_loja(conn, loja_id) or '— nenhuma'}**")
+            st.caption(f"Catraca de **entrada**: **{_eq_in or '— nenhuma'}** · "
+                       f"catraca de **saída**: **{_eq_out or '— nenhuma'}**")
             if _res:
                 st.json(_res)
                 st.caption("com_catraca = acessos numa catraca vinculada a uma loja · "
                            "com_ativo = motoboy ativo na loja daquela catraca · "
-                           "add = entraram na fila agora · equips = catracas vistas "
-                           "nos acessos · status = AccessValidationStatus.")
+                           "add = entraram na fila agora · sai = saíram da fila · "
+                           "equips = catracas vistas · status = AccessValidationStatus.")
 
     from datetime import timezone as _tz
     _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)
