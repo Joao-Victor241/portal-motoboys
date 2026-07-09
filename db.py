@@ -949,6 +949,13 @@ def sair_da_fila(conn, loja_id, motoboy_id) -> bool:
     return True
 
 
+def limpar_fila(conn, loja_id):
+    """Esvazia a fila de aguardando desta loja (recomeçar um teste)."""
+    conn.execute("DELETE FROM fila_expedicao WHERE loja_id=? AND situacao='aguardando'",
+                 (loja_id,))
+    conn.commit()
+
+
 def despachados_recentes(conn, loja_id, limite=10):
     """Últimas entregas liberadas nesta loja (histórico curto)."""
     return conn.execute(

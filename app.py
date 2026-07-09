@@ -2750,8 +2750,10 @@ def _sincronizar_fila_catraca(conn, forcar=False):
       - catraca de SAÍDA: tira o motoboy da fila (saiu com o pedido);
       - cada acesso é processado UMA vez (marcado em acesso_eventos por Id+loja):
         não duplica, e cada passagem física (Id novo) conta — por isso, ao voltar
-        e passar de novo na entrada, o motoboy REENTRA na fila.
-    Devolve dict de depuração {lido, com_catraca, com_ativo, add, sai, equips, status}."""
+        e passar de novo na entrada, o motoboy REENTRA na fila;
+      - a hora de chegada usa o RELÓGIO DE BRASÍLIA do portal (não o da leitora,
+        que pode estar desacertado) e a ordem FIFO segue o Id do acesso.
+    Devolve dict de depuração {lido, com_catraca, novos, com_ativo, add, sai, ...}."""
     from datetime import timezone as _tz
     hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()
     d_ini = hoje_br - timedelta(days=7)      # janela ampla (tolera relógio da leitora)
@@ -2761,10 +2763,12 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         eventos = dmp.ler_acessos_periodo(d_ini, hoje_br, 0) or []
     except Exception as e:
         return {"lido": 0, "add": 0, "erro": str(e)}
-    add = sai = com_catraca = com_ativo = 0
+    add = sai = com_catraca = novos = com_ativo = 0
     equips_vistos = set()
     status_vistos = {}
-    for ev in eventos:
+    amostra = []                         # diagnóstico dos acessos NOVOS
+    # Ordena por Id crescente = ordem real de passagem (FIFO correto).
+    for ev in sorted(eventos, key=lambda e: int(e.get("Id") or 0)):
         eid = ev.get("Id")
         if eid is None:
             continue
@@ -2782,33 +2786,44 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         if conn.execute("SELECT 1 FROM acesso_eventos WHERE dmp_pointer=? AND loja_id=?",
                         (eid, loja_id)).fetchone():
             continue
+        novos += 1                       # acesso ainda não processado
         cpf = _cpf_do_evento(ev)
         mb = conn.execute(
             "SELECT c.motoboy_id FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
             "WHERE c.loja_id=? AND c.situacao='ativo' AND (m.cpf=? OR m.cpf=?) LIMIT 1",
             (loja_id, cpf, cpf.lstrip("0"))).fetchone()
+        if len(amostra) < 15:            # mostra os novos p/ comparar CPF/loja
+            amostra.append({"cpf": cpf, "nome": ev.get("PersonName", ""),
+                            "catraca": equip, "loja": loja_id,
+                            "ativo_aqui": bool(mb), "saida": eh_saida})
         if not mb:
             continue                     # não é motoboy ativo na loja daquela catraca
         com_ativo += 1
+        agora = db._agora_br()           # HORÁRIO DE BRASÍLIA (não o relógio da leitora)
         if eh_saida:                     # passou na SAÍDA → tira da fila
             if db.sair_da_fila(conn, loja_id, mb["motoboy_id"]):
                 sai += 1
             _tipo = "saida"
         else:                            # passou na ENTRADA → entra na fila
-            if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
-                                    chegada_em=_hora_do_evento(ev)):
+            if db.registrar_chegada(conn, loja_id, mb["motoboy_id"], chegada_em=agora):
                 add += 1
             _tipo = "entrada"
         conn.execute(
             "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
             "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
-            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), _tipo,
-             _hora_do_evento(ev) or "", eid))
+            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), _tipo, agora, eid))
     conn.commit()
-    return {"lido": len(eventos), "com_catraca": com_catraca, "com_ativo": com_ativo,
-            "add": add, "sai": sai,
+    # CPFs ativos por loja das catracas vistas (p/ conferir o match)
+    ativos = {}
+    for _lj in set(list(emap_in.values()) + list(emap_out.values())):
+        cps = conn.execute(
+            "SELECT m.cpf FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
+            "WHERE c.loja_id=? AND c.situacao='ativo'", (_lj,)).fetchall()
+        ativos[_lj] = [r["cpf"] for r in cps]
+    return {"lido": len(eventos), "com_catraca": com_catraca, "novos": novos,
+            "com_ativo": com_ativo, "add": add, "sai": sai,
             "equips": ",".join(sorted(e for e in equips_vistos if e)),
-            "status": status_vistos}
+            "status": status_vistos, "ativos_por_loja": ativos, "amostra": amostra}
 
 
 def tela_operador(usuario):
@@ -2910,11 +2925,17 @@ def tela_operador(usuario):
         st.warning("A fila automática precisa do **AccessLog** configurado "
                    "(variável `DMP_NAK_ACCESSLOG` nos Secrets).")
     else:
-        cst1, cst2 = st.columns([3, 1])
+        cst1, cst2, cst3 = st.columns([3, 1, 1])
         cst1.caption("🟢 **Fila automática:** quem passa no reconhecimento facial da "
                      "catraca entra aqui sozinho, na ordem de chegada.")
         if cst2.button("🔄 Puxar da catraca", use_container_width=True, key="op_sync_al"):
             st.session_state["_ultimo_sync_al"] = 0   # força sincronizar já
+            st.rerun()
+        if cst3.button("🧹 Limpar fila", use_container_width=True, key="op_limpar_fila",
+                       help="Esvazia a fila desta loja (útil para recomeçar um teste)."):
+            db.limpar_fila(conn, loja_id)
+            st.session_state["_ultimo_sync_al"] = 0
+            st.toast("Fila esvaziada.")
             st.rerun()
         _eq_in = db.get_equip_loja(conn, loja_id)
         _eq_out = db.get_equip_saida(conn, loja_id)
@@ -2931,10 +2952,12 @@ def tela_operador(usuario):
                        f"catraca de **saída**: **{_eq_out or '— nenhuma'}**")
             if _res:
                 st.json(_res)
-                st.caption("com_catraca = acessos numa catraca vinculada a uma loja · "
-                           "com_ativo = motoboy ativo na loja daquela catraca · "
-                           "add = entraram na fila agora · sai = saíram da fila · "
-                           "equips = catracas vistas · status = AccessValidationStatus.")
+                st.caption("**novos** = acessos que a leitora enviou e ainda não tinham "
+                           "sido processados (se for **0**, a leitora não mandou passagem "
+                           "nova para a nuvem) · **com_ativo** = casaram com motoboy ativo "
+                           "na loja da catraca · **add/sai** = entraram/saíram da fila · "
+                           "**amostra** = os acessos novos (compare `cpf` com "
+                           "`ativos_por_loja`) · **status** = AccessValidationStatus.")
 
     from datetime import timezone as _tz
     _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)
