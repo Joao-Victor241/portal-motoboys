@@ -1936,6 +1936,7 @@ def tela_admin(usuario):
 
         rel_tabs = st.tabs([
             "🏪 Situação por loja",
+            "🛰️ Catraca / KPIs",
             "🚨 Alertas",
             "🏢 Resumo por OL",
             "📋 Auditoria",
@@ -1994,9 +1995,15 @@ def tela_admin(usuario):
                         st.dataframe(dados, use_container_width=True, hide_index=True)
 
         # ------------------------------------------------------------------
-        # 2) ALERTAS — itens que precisam de atenção
+        # 2) CATRACA / KPIs — chegada, fila, entrega, ranking
         # ------------------------------------------------------------------
         with rel_tabs[1]:
+            _render_kpis_catraca(conn, HOJE_REL)
+
+        # ------------------------------------------------------------------
+        # 3) ALERTAS — itens que precisam de atenção
+        # ------------------------------------------------------------------
+        with rel_tabs[2]:
             st.markdown("#### Alertas operacionais")
 
             # --- CNH vencida ou vencendo em 30 dias ---
@@ -2102,7 +2109,7 @@ def tela_admin(usuario):
         # ------------------------------------------------------------------
         # 3) RESUMO POR OL
         # ------------------------------------------------------------------
-        with rel_tabs[2]:
+        with rel_tabs[3]:
             st.markdown("#### Resumo por Operador Logístico")
 
             ols_rel = conn.execute(
@@ -2159,7 +2166,7 @@ def tela_admin(usuario):
         # ------------------------------------------------------------------
         # 4) AUDITORIA — trilha de quem fez o quê e quando
         # ------------------------------------------------------------------
-        with rel_tabs[3]:
+        with rel_tabs[4]:
             st.markdown("#### Trilha de auditoria")
             st.caption(
                 "Registro completo de todas as ações realizadas no portal: "
@@ -2828,6 +2835,234 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             "com_ativo": com_ativo, "add": add, "sai": sai,
             "equips": ",".join(sorted(e for e in equips_vistos if e)),
             "status": status_vistos, "ativos_por_loja": ativos, "amostra": amostra}
+
+
+def _hhmm(minutos):
+    """Formata minutos como 'Xh YYmin' ou 'YYmin'."""
+    if minutos is None:
+        return "—"
+    m = int(round(minutos))
+    return f"{m // 60}h {m % 60:02d}min" if m >= 60 else f"{m}min"
+
+
+def _computar_kpis(eventos, filas):
+    """Calcula os KPIs a partir das passagens (acesso_eventos) e da fila
+    (fila_expedicao). Tudo em Python (portável SQLite/PG). Devolve um dict com
+    visão geral, ranking por motoboy, detalhe por dia e distribuições."""
+    from collections import defaultdict
+
+    def _p(s):
+        try:
+            return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+    evs = []
+    for e in eventos:
+        t = _p(e["ocorrido_em"])
+        if t:
+            evs.append({"mb": e["motoboy_id"], "nome": e["nome"], "loja": e["loja"],
+                        "tipo": e["tipo"], "t": t, "dia": t.strftime("%Y-%m-%d")})
+
+    # --- tempo de espera na fila + nº de despachos (entregas) por motoboy ----
+    esperas, esp_mb, desp_mb, nomes = [], defaultdict(list), defaultdict(int), {}
+    for f in filas:
+        nomes[f["motoboy_id"]] = f["nome"]
+        ch, dp = _p(f["chegada_em"]), _p(f["despachado_em"])
+        if ch and dp and dp >= ch:
+            w = (dp - ch).total_seconds() / 60
+            esperas.append(w)
+            esp_mb[f["motoboy_id"]].append(w)
+        if dp:
+            desp_mb[f["motoboy_id"]] += 1
+
+    # --- duração de entrega: do despacho até a PRÓXIMA entrada do motoboy ----
+    entradas_mb = defaultdict(list)
+    for e in evs:
+        nomes.setdefault(e["mb"], e["nome"])
+        if e["tipo"] == "entrada":
+            entradas_mb[e["mb"]].append(e["t"])
+    for k in entradas_mb:
+        entradas_mb[k].sort()
+    dur_all, dur_mb = [], defaultdict(list)
+    for f in filas:
+        dp = _p(f["despachado_em"])
+        if not dp:
+            continue
+        prox = next((t for t in entradas_mb.get(f["motoboy_id"], []) if t > dp), None)
+        if prox:
+            d = (prox - dp).total_seconds() / 60
+            if 0 < d <= 600:            # ignora >10h (não é a mesma viagem)
+                dur_all.append(d)
+                dur_mb[f["motoboy_id"]].append(d)
+
+    # --- pico de fila (máximo aguardando simultaneamente) -------------------
+    pontos = []
+    for f in filas:
+        ch, dp = _p(f["chegada_em"]), _p(f["despachado_em"])
+        if ch:
+            pontos.append((ch, 1))
+            if dp:
+                pontos.append((dp, -1))
+    pontos.sort(key=lambda x: x[0])
+    cur = pico = 0
+    for _, d in pontos:
+        cur += d
+        pico = max(pico, cur)
+
+    # --- chegadas: 1ª entrada por (motoboy, dia) ----------------------------
+    prim_entrada = {}
+    for e in evs:
+        if e["tipo"] == "entrada":
+            k = (e["mb"], e["dia"])
+            if k not in prim_entrada or e["t"] < prim_entrada[k]:
+                prim_entrada[k] = e["t"]
+    cheg_dia, cheg_hora = defaultdict(int), defaultdict(int)
+    for (_mb, dia), t in prim_entrada.items():
+        cheg_dia[dia] += 1
+        cheg_hora[t.strftime("%H") + "h"] += 1
+
+    # --- detalhe por (motoboy, dia): jornada, pausa, 1ª chegada, último -----
+    por_mbdia = defaultdict(list)
+    for e in evs:
+        por_mbdia[(e["mb"], e["dia"])].append(e)
+    detalhe, dias_mb = [], defaultdict(set)
+    for (mb, dia), lst in por_mbdia.items():
+        lst.sort(key=lambda x: x["t"])
+        dias_mb[mb].add(dia)
+        prim, ult = lst[0]["t"], lst[-1]["t"]
+        maior, g_ini, g_fim = 0, None, None
+        for a, b in zip(lst, lst[1:]):
+            g = (b["t"] - a["t"]).total_seconds() / 60
+            if g > maior:
+                maior, g_ini, g_fim = g, a["t"], b["t"]
+        detalhe.append({
+            "Dia": dia, "Motoboy": lst[0]["nome"],
+            "1ª chegada": prim.strftime("%H:%M"),
+            "Último registro": ult.strftime("%H:%M"),
+            "Jornada": _hhmm((ult - prim).total_seconds() / 60),
+            "Pausa/almoço (estim.)": (f"{g_ini.strftime('%H:%M')}–{g_fim.strftime('%H:%M')} "
+                                       f"({_hhmm(maior)})") if maior >= 20 else "—",
+            "Entregas": sum(1 for f in filas if f["motoboy_id"] == mb
+                            and str(f["despachado_em"] or "")[:10] == dia),
+        })
+    detalhe.sort(key=lambda r: (r["Dia"], r["Motoboy"]), reverse=False)
+
+    # --- ranking por motoboy (agregado no período) --------------------------
+    def _media(xs):
+        return sum(xs) / len(xs) if xs else None
+    ranking = []
+    for mb in nomes:
+        ranking.append({
+            "Motoboy": nomes[mb],
+            "Dias": len(dias_mb.get(mb, [])),
+            "Entregas": desp_mb.get(mb, 0),
+            "Tempo médio na fila": _hhmm(_media(esp_mb.get(mb, []))),
+            "Duração média entrega": _hhmm(_media(dur_mb.get(mb, []))),
+            "_ord": desp_mb.get(mb, 0),
+        })
+    ranking.sort(key=lambda r: r["_ord"], reverse=True)
+    for r in ranking:
+        r.pop("_ord", None)
+
+    return {
+        "n_eventos": len(evs),
+        "entregas": sum(desp_mb.values()),
+        "motoboys": len([m for m in nomes if desp_mb.get(m) or dias_mb.get(m)]),
+        "dias": len({e["dia"] for e in evs}),
+        "espera_media": _media(esperas),
+        "espera_max": max(esperas) if esperas else None,
+        "dur_media": _media(dur_all),
+        "n_entregas_medidas": len(dur_all),
+        "pico_fila": pico,
+        "cheg_dia": dict(sorted(cheg_dia.items())),
+        "cheg_hora": dict(sorted(cheg_hora.items())),
+        "ranking": ranking,
+        "detalhe": detalhe,
+    }
+
+
+def _render_kpis_catraca(conn, HOJE):
+    """Sub-aba de Relatórios: KPIs operacionais da catraca/fila."""
+    st.markdown("#### 🛰️ KPIs da operação (catraca + fila FIFO)")
+    st.caption("Calculado a partir das passagens na catraca e da fila de expedição. "
+               "Depende da leitora enviar os eventos para a nuvem.")
+
+    c1, c2, c3 = st.columns([2, 2, 3])
+    d_ini = c1.date_input("De", value=HOJE - timedelta(days=30),
+                          key="kpi_di", format="DD/MM/YYYY")
+    d_fim = c2.date_input("Até", value=HOJE, key="kpi_df", format="DD/MM/YYYY")
+    lojas = conn.execute("SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
+    op = ["Todas as lojas"] + [l["nome"] for l in lojas]
+    sel = c3.selectbox("Loja", op, key="kpi_loja")
+    loja_id = None
+    if sel != "Todas as lojas":
+        loja_id = next((l["id"] for l in lojas if l["nome"] == sel), None)
+
+    ini = f"{d_ini} 00:00:00"
+    fim = f"{d_fim + timedelta(days=1)} 00:00:00"
+    eventos = db.eventos_periodo(conn, ini, fim, loja_id)
+    filas = db.fila_periodo(conn, ini, fim, loja_id)
+
+    if not eventos and not filas:
+        st.info("Nenhum dado de catraca no período. Assim que a leitora voltar a enviar "
+                "as passagens para a nuvem (e o operador usar a fila), os KPIs aparecem "
+                "aqui automaticamente.")
+        return
+
+    k = _computar_kpis(eventos, filas)
+
+    st.markdown("##### Visão geral")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Entregas", k["entregas"])
+    m2.metric("Motoboys ativos", k["motoboys"])
+    m3.metric("Tempo médio na fila", _hhmm(k["espera_media"]))
+    m4.metric("Duração média entrega", _hhmm(k["dur_media"]))
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("Passagens", k["n_eventos"])
+    m6.metric("Dias com dados", k["dias"])
+    m7.metric("Pico da fila", k["pico_fila"])
+    m8.metric("Maior espera", _hhmm(k["espera_max"]))
+    if k["dur_media"] is not None:
+        st.caption(f"Duração de entrega medida em {k['n_entregas_medidas']} viagem(ns) "
+                   "(do despacho até a próxima chegada do motoboy).")
+
+    if k["cheg_dia"]:
+        st.markdown("##### Chegadas por dia")
+        st.bar_chart(k["cheg_dia"], height=220)
+    if k["cheg_hora"]:
+        st.markdown("##### Chegadas por horário do dia")
+        st.bar_chart(k["cheg_hora"], height=220)
+
+    if k["ranking"]:
+        st.markdown("##### Ranking por motoboy")
+        st.dataframe(k["ranking"], use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Baixar ranking (CSV)",
+                           _para_csv(k["ranking"]), file_name="ranking_motoboys.csv",
+                           mime="text/csv", key="kpi_dl_rank")
+
+    if k["detalhe"]:
+        st.markdown("##### Detalhe por dia (chegada · almoço/pausa · saída · jornada)")
+        st.caption("A **pausa/almoço** é o maior intervalo sem passagem no dia (estimado). "
+                   "O **último registro** é a última passagem — com a leitora de saída "
+                   "instalada, será o horário de saída de fato.")
+        st.dataframe(k["detalhe"], use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Baixar detalhe por dia (CSV)",
+                           _para_csv(k["detalhe"]), file_name="detalhe_por_dia.csv",
+                           mime="text/csv", key="kpi_dl_det")
+
+
+def _para_csv(linhas):
+    """Lista de dicts → CSV (bytes utf-8-sig p/ abrir certinho no Excel)."""
+    import csv
+    import io
+    if not linhas:
+        return b""
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=list(linhas[0].keys()), delimiter=";")
+    w.writeheader()
+    w.writerows(linhas)
+    return buf.getvalue().encode("utf-8-sig")
 
 
 def tela_operador(usuario):

@@ -956,6 +956,37 @@ def limpar_fila(conn, loja_id):
     conn.commit()
 
 
+# ---- Dados brutos para RELATÓRIOS / KPIs (histórico da catraca) ------------
+
+def eventos_periodo(conn, ini, fim, loja_id=None):
+    """Passagens registradas (acesso_eventos) no período [ini, fim) — strings
+    'AAAA-MM-DD HH:MM:SS'. Base dos relatórios de chegada/saída/duração."""
+    q = ("SELECT e.id, e.motoboy_id, e.nome, e.cpf, e.loja_id, e.tipo, e.ocorrido_em, "
+         "l.nome AS loja FROM acesso_eventos e LEFT JOIN lojas l ON l.id=e.loja_id "
+         "WHERE e.ocorrido_em >= ? AND e.ocorrido_em < ?")
+    p = [ini, fim]
+    if loja_id:
+        q += " AND e.loja_id=?"
+        p.append(loja_id)
+    q += " ORDER BY e.ocorrido_em ASC, e.id ASC"
+    return conn.execute(q, tuple(p)).fetchall()
+
+
+def fila_periodo(conn, ini, fim, loja_id=None):
+    """Registros da fila FIFO (fila_expedicao) no período (por chegada_em) —
+    base do tempo de espera na fila e do nº de despachos (entregas)."""
+    q = ("SELECT f.id, f.motoboy_id, m.nome, f.loja_id, f.chegada_em, f.despachado_em, "
+         "f.situacao, l.nome AS loja FROM fila_expedicao f "
+         "JOIN motoboys m ON m.id=f.motoboy_id LEFT JOIN lojas l ON l.id=f.loja_id "
+         "WHERE f.chegada_em >= ? AND f.chegada_em < ?")
+    p = [ini, fim]
+    if loja_id:
+        q += " AND f.loja_id=?"
+        p.append(loja_id)
+    q += " ORDER BY f.chegada_em ASC, f.id ASC"
+    return conn.execute(q, tuple(p)).fetchall()
+
+
 def despachados_recentes(conn, loja_id, limite=10):
     """Últimas entregas liberadas nesta loja (histórico curto)."""
     return conn.execute(
