@@ -2775,6 +2775,7 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     equips_vistos = set()
     status_vistos = {}
     amostra = []                         # diagnóstico dos acessos NOVOS
+    ultimo_ev = None                     # AccessDateTime mais recente (relógio da leitora)
     # Ordena por Id crescente = ordem real de passagem (FIFO correto).
     for ev in sorted(eventos, key=lambda e: int(e.get("Id") or 0)):
         eid = ev.get("Id")
@@ -2783,6 +2784,9 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         eid = int(eid)
         equip = str(ev.get("EquipmentNumber") or "").strip()
         equips_vistos.add(equip)
+        _te = _hora_do_evento(ev)
+        if _te and (ultimo_ev is None or _te > ultimo_ev):
+            ultimo_ev = _te
         _stt = ev.get("AccessValidationStatus")
         status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
         eh_saida = equip in emap_out
@@ -2834,7 +2838,8 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     return {"lido": len(eventos), "com_catraca": com_catraca, "novos": novos,
             "com_ativo": com_ativo, "add": add, "sai": sai,
             "equips": ",".join(sorted(e for e in equips_vistos if e)),
-            "status": status_vistos, "ativos_por_loja": ativos, "amostra": amostra}
+            "status": status_vistos, "ativos_por_loja": ativos, "amostra": amostra,
+            "ultimo_evento": ultimo_ev}
 
 
 def _hhmm(minutos):
@@ -3185,6 +3190,23 @@ def tela_operador(usuario):
             st.warning(f"Não consegui ler a catraca: {_res['erro']}")
         elif "lido" in _res:
             st.caption(f"🔎 Catraca conectada · {_res['lido']} acesso(s) recentes lidos.")
+            # Aviso de relógio: compara o acesso mais recente com a hora real (BR).
+            _ult = _res.get("ultimo_evento")
+            if _ult:
+                try:
+                    from datetime import timezone as _tzc
+                    _now = datetime.now(_tzc.utc) - timedelta(hours=3)
+                    _ue = datetime.strptime(str(_ult)[:19], "%Y-%m-%d %H:%M:%S")
+                    _dif = (_now.replace(tzinfo=None) - _ue).total_seconds() / 3600
+                    if abs(_dif) >= 12:      # acesso mais recente >12h longe do "agora"
+                        st.warning(
+                            f"⏰ O acesso mais recente da leitora é de **{_ue.strftime('%d/%m %H:%M')}** "
+                            f"— cerca de **{abs(int(_dif // 24))} dia(s)** fora do horário atual. "
+                            "O **relógio da catraca** provavelmente está desacertado: as passagens "
+                            "de hoje podem entrar na fila, mas os horários dos relatórios sairão "
+                            "errados. Peça à Dimep para acertar o relógio (horário de Brasília).")
+                except Exception:
+                    pass
 
         with st.expander("🔧 Detalhes da sincronização (debug)"):
             st.caption(f"Catraca de **entrada**: **{_eq_in or '— nenhuma'}** · "
