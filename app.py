@@ -2730,14 +2730,13 @@ def _hora_do_evento(ev):
 
 
 def _sincronizar_fila_catraca(conn, forcar=False):
-    """Sincroniza a fila FIFO com a catraca (AccessLog logType=0), de forma GLOBAL:
-      - lê uma janela ampla (robusto a relógio da leitora) e usa o `Id` do acesso
-        para processar só o que é NOVO (acesso_estado.ultimo_pointer = maior Id já visto);
-      - na 1ª vez estabelece uma LINHA DE BASE (não importa histórico — a fila começa
-        a valer a partir de agora);
-      - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA, e só coloca na fila
-        se o motoboy estiver ATIVO naquela loja.
-    Devolve dict com {lido, add, baseline, erro}."""
+    """Sincroniza a fila FIFO com a catraca (AccessLog logType=0):
+      - lê uma janela de 7 dias (robusto ao relógio da leitora);
+      - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA;
+      - só coloca na fila motoboy ATIVO naquela loja;
+      - cada acesso entra UMA vez (marcado em acesso_eventos por Id+loja): não
+        duplica, não reentra após ser despachado, e o "puxar" pode reprocessar.
+    Devolve dict de depuração {lido, com_catraca, com_ativo, add, equips, status}."""
     from datetime import timezone as _tz
     hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()
     d_ini = hoje_br - timedelta(days=7)      # janela ampla (tolera relógio da leitora)
@@ -2746,36 +2745,27 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         eventos = dmp.ler_acessos_periodo(d_ini, hoje_br, 0) or []
     except Exception as e:
         return {"lido": 0, "add": 0, "erro": str(e)}
-    ids = [int(ev["Id"]) for ev in eventos if ev.get("Id") is not None]
-    if not ids:
-        return {"lido": 0, "add": 0}
-    max_id = max(ids)
-    est = conn.execute("SELECT ultimo_pointer FROM acesso_estado WHERE id=1").fetchone()
-    ultimo = (est["ultimo_pointer"] if est else 0) or 0
-    if ultimo == 0 and not forcar:
-        # Linha de base: passa a contar a partir de agora (ignora o histórico).
-        conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1", (max_id,))
-        conn.commit()
-        return {"lido": len(eventos), "add": 0, "baseline": True, "max_id": max_id}
-
-    corte = 0 if forcar else ultimo      # forçar = processa tudo (teste)
-    add = novos = com_catraca = com_ativo = 0
+    add = com_catraca = com_ativo = 0
     equips_vistos = set()
     status_vistos = {}
     for ev in eventos:
-        eid = int(ev.get("Id") or 0)
-        if eid <= corte:
-            continue                     # já processado
-        novos += 1
-        _stt = ev.get("AccessValidationStatus")
-        status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
+        eid = ev.get("Id")
+        if eid is None:
+            continue
+        eid = int(eid)
         equip = str(ev.get("EquipmentNumber") or "").strip()
         equips_vistos.add(equip)
-        cpf = _cpf_do_evento(ev)
+        _stt = ev.get("AccessValidationStatus")
+        status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
         loja_id = emap.get(equip)
-        if not cpf or not loja_id:
-            continue                     # sem CPF ou catraca não mapeada a uma loja
+        if not loja_id:
+            continue                     # catraca não vinculada a uma loja
         com_catraca += 1
+        # Já processado nesta loja? (evita duplicar e reentrar após despachar)
+        if conn.execute("SELECT 1 FROM acesso_eventos WHERE dmp_pointer=? AND loja_id=?",
+                        (eid, loja_id)).fetchone():
+            continue
+        cpf = _cpf_do_evento(ev)
         mb = conn.execute(
             "SELECT c.motoboy_id FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
             "WHERE c.loja_id=? AND c.situacao='ativo' AND (m.cpf=? OR m.cpf=?) LIMIT 1",
@@ -2786,12 +2776,14 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         if db.registrar_chegada(conn, loja_id, mb["motoboy_id"],
                                 chegada_em=_hora_do_evento(ev)):
             add += 1
-    conn.execute("UPDATE acesso_estado SET ultimo_pointer=? WHERE id=1",
-                 (max(ultimo, max_id),))
+        conn.execute(
+            "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
+            "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
+            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), "acesso",
+             _hora_do_evento(ev) or "", eid))
     conn.commit()
-    return {"lido": len(eventos), "novos": novos, "com_catraca": com_catraca,
-            "com_ativo": com_ativo, "add": add, "ultimo": ultimo, "max_id": max_id,
-            "equips": ",".join(sorted(e for e in equips_vistos if e)),
+    return {"lido": len(eventos), "com_catraca": com_catraca, "com_ativo": com_ativo,
+            "add": add, "equips": ",".join(sorted(e for e in equips_vistos if e)),
             "status": status_vistos}
 
 
@@ -2905,9 +2897,6 @@ def tela_operador(usuario):
                        "para vincular em **Administração → 🛰️ AccessLog / catracas**.")
         elif _res.get("erro"):
             st.warning(f"Não consegui ler a catraca: {_res['erro']}")
-        elif _res.get("baseline"):
-            st.info("Catraca conectada ✅ — a fila registra os acessos **a partir de "
-                    "agora**. Passe na leitora e o motoboy aparece aqui.")
         elif "lido" in _res:
             st.caption(f"🔎 Catraca conectada · {_res['lido']} acesso(s) recentes lidos.")
 
@@ -2916,14 +2905,10 @@ def tela_operador(usuario):
                        f"**{db.get_equip_loja(conn, loja_id) or '— nenhuma'}**")
             if _res:
                 st.json(_res)
-                st.caption("novos = acessos com Id maior que a base · com_catraca = bateram "
-                           "numa catraca vinculada · com_ativo = motoboy ativo na loja da "
-                           "catraca · add = entraram na fila · equips = nº de catraca vistos "
-                           "nos acessos novos.")
-            if st.button("🧪 Processar acessos existentes (teste)", key="al_forcar"):
-                res2 = _sincronizar_fila_catraca(conn, forcar=True)
-                st.session_state["_al_res"] = res2
-                st.rerun()
+                st.caption("com_catraca = acessos numa catraca vinculada a uma loja · "
+                           "com_ativo = motoboy ativo na loja daquela catraca · "
+                           "add = entraram na fila agora · equips = catracas vistas "
+                           "nos acessos · status = AccessValidationStatus.")
 
     from datetime import timezone as _tz
     _agora_br = datetime.now(_tz.utc) - timedelta(hours=3)
