@@ -2800,7 +2800,8 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         if not mb:
             continue                     # não é motoboy ativo na loja daquela catraca
         com_ativo += 1
-        agora = db._agora_br()           # HORÁRIO DE BRASÍLIA (não o relógio da leitora)
+        agora = db._agora_br()           # horário BR do portal (p/ a fila / "esperando")
+        hora_ev = _hora_do_evento(ev) or agora   # hora REAL da passagem (p/ relatórios/KPIs)
         if eh_saida:                     # passou na SAÍDA → tira da fila
             if db.sair_da_fila(conn, loja_id, mb["motoboy_id"]):
                 sai += 1
@@ -2809,10 +2810,12 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             if db.registrar_chegada(conn, loja_id, mb["motoboy_id"], chegada_em=agora):
                 add += 1
             _tipo = "entrada"
+        # acesso_eventos = histórico bruto p/ relatórios: guarda a HORA REAL do evento
+        # (AccessDateTime da leitora). A fila usa `agora` só para o "esperando" ao vivo.
         conn.execute(
             "INSERT INTO acesso_eventos (motoboy_id, loja_id, cpf, nome, tipo, "
             "ocorrido_em, dmp_pointer) VALUES (?,?,?,?,?,?,?)",
-            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), _tipo, agora, eid))
+            (mb["motoboy_id"], loja_id, cpf, ev.get("PersonName", ""), _tipo, hora_ev, eid))
     conn.commit()
     # CPFs ativos por loja das catracas vistas (p/ conferir o match)
     ativos = {}
