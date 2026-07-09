@@ -2744,7 +2744,7 @@ def _hora_do_evento(ev):
 
 def _sincronizar_fila_catraca(conn, forcar=False):
     """Sincroniza a fila FIFO com as catracas (AccessLog logType=0):
-      - lê uma janela de 7 dias (robusto ao relógio da leitora);
+      - lê uma janela de 30 dias (robusto ao relógio desacertado da leitora);
       - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA;
       - catraca de ENTRADA: coloca o motoboy ativo na fila da loja;
       - catraca de SAÍDA: tira o motoboy da fila (saiu com o pedido);
@@ -2756,11 +2756,12 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     Devolve dict de depuração {lido, com_catraca, novos, com_ativo, add, sai, ...}."""
     from datetime import timezone as _tz
     hoje_br = (datetime.now(_tz.utc) - timedelta(hours=3)).date()
-    d_ini = hoje_br - timedelta(days=7)      # janela ampla (tolera relógio da leitora)
+    amanha = hoje_br + timedelta(days=1)     # inclui o dia de hoje mesmo se a leitora adianta
+    d_ini = hoje_br - timedelta(days=30)     # janela ampla (tolera relógio desacertado)
     emap_in = db.mapa_equip_loja(conn)       # catracas de entrada
     emap_out = db.mapa_equip_saida(conn)     # catracas de saída
     try:
-        eventos = dmp.ler_acessos_periodo(d_ini, hoje_br, 0) or []
+        eventos = dmp.ler_acessos_periodo(d_ini, amanha, 0) or []
     except Exception as e:
         return {"lido": 0, "add": 0, "erro": str(e)}
     add = sai = com_catraca = novos = com_ativo = 0
