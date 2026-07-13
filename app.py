@@ -1621,8 +1621,11 @@ def tela_admin(usuario):
                    "**saída** em cada loja. Quem passa na **entrada** entra na fila da "
                    "unidade; quem passa na **saída** sai da fila (saiu com o pedido) — e "
                    "quando volta e passa na entrada de novo, **reentra na fila**. "
-                   "Enquanto só houver uma leitora, preencha só a **entrada**: aí o motoboy "
-                   "sai da fila pelo botão do operador e reentra ao passar de novo. "
+                   "Enquanto só houver uma leitora, você tem 2 opções: **(a)** preencher só "
+                   "a **entrada** — o motoboy sai da fila pelo botão do operador e reentra "
+                   "ao passar de novo; ou **(b) MODO DE TESTE** — colocar o **mesmo número** "
+                   "na entrada E na saída: aí cada passagem alterna sozinha (fora da fila = "
+                   "entra; na fila = sai), simulando o ciclo com uma leitora só. "
                    "Para ver o número, use o diagnóstico abaixo. Vários na mesma loja: "
                    "separe por vírgula.")
         ce, cs, _ = st.columns([2, 2, 2])
@@ -2815,8 +2818,12 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             ultimo_ev = _te
         _stt = ev.get("AccessValidationStatus")
         status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
-        eh_saida = equip in emap_out
-        loja_id = emap_out.get(equip) if eh_saida else emap_in.get(equip)
+        equip_in = equip in emap_in
+        equip_out = equip in emap_out
+        # MESMA leitora nos dois campos = modo de teste com uma catraca só:
+        # a direção é decidida pelo estado (na fila → saída; fora → entrada).
+        dual = equip_in and equip_out
+        loja_id = emap_in.get(equip) if equip_in else emap_out.get(equip)
         if not loja_id:
             continue                     # catraca não vinculada a nenhuma loja
         com_catraca += 1
@@ -2833,10 +2840,18 @@ def _sincronizar_fila_catraca(conn, forcar=False):
         if len(amostra) < 15:            # mostra os novos p/ comparar CPF/loja
             amostra.append({"cpf": cpf, "nome": ev.get("PersonName", ""),
                             "catraca": equip, "loja": loja_id,
-                            "ativo_aqui": bool(mb), "saida": eh_saida})
+                            "ativo_aqui": bool(mb),
+                            "direcao": "auto" if dual else ("saida" if equip_out else "entrada")})
         if not mb:
             continue                     # não é motoboy ativo na loja daquela catraca
         com_ativo += 1
+        if dual:                         # 1 leitora: na fila = está saindo; fora = chegando
+            _na_fila = conn.execute(
+                "SELECT 1 FROM fila_expedicao WHERE loja_id=? AND motoboy_id=? "
+                "AND situacao='aguardando'", (loja_id, mb["motoboy_id"])).fetchone()
+            eh_saida = bool(_na_fila)
+        else:
+            eh_saida = equip_out
         agora = db._agora_br()           # horário BR do portal (p/ a fila / "esperando")
         hora_ev = _hora_do_evento(ev) or agora   # hora REAL da passagem (p/ relatórios/KPIs)
         if eh_saida:                     # passou na SAÍDA → tira da fila
