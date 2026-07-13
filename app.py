@@ -2779,7 +2779,7 @@ def _hora_do_evento(ev):
 
 
 def _sincronizar_fila_catraca(conn, forcar=False):
-    """Sincroniza a fila FIFO com as catracas (AccessLog logType=3, só status 10/12):
+    """Sincroniza a fila FIFO com as catracas (AccessLog logType=3, ignora status 6):
       - lê uma janela de 30 dias (robusto ao relógio desacertado da leitora);
       - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA;
       - catraca de ENTRADA: coloca o motoboy ativo na fila da loja;
@@ -2818,14 +2818,14 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             ultimo_ev = _te
         _stt = ev.get("AccessValidationStatus")
         status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
-        # Só passagens CONCLUÍDAS entram na lógica da fila:
-        #   10 = Acesso Concluído · 12 = Acesso Concluído em Batch.
-        # Ignora: 1=permitido (ainda não passou), 6=bloqueado, 8=não concluído.
+        # Considera a passagem se NÃO foi bloqueada. (6 = credencial/pessoa
+        # bloqueada). Os demais status — 1 permitido, 8 não concluído, 10
+        # concluído, 12 concluído em batch, etc. — contam como "o motoboy passou".
         try:
             _stt_i = int(_stt)
         except (TypeError, ValueError):
             _stt_i = None
-        if _stt_i not in (10, 12):
+        if _stt_i == 6:                  # bloqueado → não entra na fila
             continue
         equip_in = equip in emap_in
         equip_out = equip in emap_out
@@ -2842,13 +2842,15 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             continue
         novos += 1                       # acesso ainda não processado
         cpf = _cpf_do_evento(ev)
+        # Compara CPF SEM zeros à esquerda dos dois lados (o evento às vezes vem
+        # sem o zero inicial: "3752728108" vs cadastro "03752728108").
         mb = conn.execute(
             "SELECT c.motoboy_id FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
-            "WHERE c.loja_id=? AND c.situacao='ativo' AND (m.cpf=? OR m.cpf=?) LIMIT 1",
-            (loja_id, cpf, cpf.lstrip("0"))).fetchone()
-        if len(amostra) < 15:            # mostra os novos p/ comparar CPF/loja
+            "WHERE c.loja_id=? AND c.situacao='ativo' AND ltrim(m.cpf,'0')=ltrim(?,'0') LIMIT 1",
+            (loja_id, cpf)).fetchone()
+        if len(amostra) < 15:            # mostra os novos p/ comparar CPF/loja/status
             amostra.append({"cpf": cpf, "nome": ev.get("PersonName", ""),
-                            "catraca": equip, "loja": loja_id,
+                            "catraca": equip, "loja": loja_id, "status": _stt_i,
                             "ativo_aqui": bool(mb),
                             "direcao": "auto" if dual else ("saida" if equip_out else "entrada")})
         if not mb:
