@@ -106,7 +106,7 @@ class DMPClient:
             self.logon_accesslog()
         return {"Authorization": f"Bearer {self._bearer_al}"}
 
-    def ler_acessos_periodo(self, data_ini, data_fim, log_type: int = 0) -> list:
+    def ler_acessos_periodo(self, data_ini, data_fim, log_type: int = 3) -> list:
         """GET /api/v1/AccessLog/{aaaa}/{mm}/{dd}/{aaaa}/{mm}/{dd}/{logType}.
         Lista os eventos de acesso (catraca) entre duas datas. Usa o bearer do
         AccessLog. Devolve lista (defensivo p/ variações de formato)."""
@@ -124,8 +124,8 @@ class DMPClient:
             return js
         return js.get("items", js.get("Items", [])) if isinstance(js, dict) else []
 
-    def diagnostico_accesslog(self, data_ini, data_fim, log_types=(0,)) -> dict:
-        """Testa logon + leitura do AccessLog (logType 0 = acessos concedidos).
+    def diagnostico_accesslog(self, data_ini, data_fim, log_types=(3,)) -> dict:
+        """Testa logon + leitura do AccessLog (logType 3 = retorna todos os eventos).
         Devolve status/resposta e o primeiro evento (para ver os campos)."""
         out = {"tem_token": bool(self.nak_accesslog), "passos": []}
         if self.simulado:

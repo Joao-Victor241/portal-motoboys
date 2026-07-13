@@ -1650,7 +1650,7 @@ def tela_admin(usuario):
 
         st.divider()
         st.markdown("**Diagnóstico do AccessLog**")
-        st.caption("Testa a leitura ao vivo (usa o **logType 0** — acessos concedidos). "
+        st.caption("Testa a leitura ao vivo (usa o **logType 3** — retorna todos os eventos). "
                    "Precisa da variável `DMP_NAK_ACCESSLOG` nos Secrets.")
         alc1, alc2 = st.columns(2)
         _al_di = alc1.date_input("De", value=HOJE - timedelta(days=7),
@@ -2779,7 +2779,7 @@ def _hora_do_evento(ev):
 
 
 def _sincronizar_fila_catraca(conn, forcar=False):
-    """Sincroniza a fila FIFO com as catracas (AccessLog logType=0):
+    """Sincroniza a fila FIFO com as catracas (AccessLog logType=3, só status 10/12):
       - lê uma janela de 30 dias (robusto ao relógio desacertado da leitora);
       - roteia cada acesso pela CATRACA (EquipmentNumber) → LOJA;
       - catraca de ENTRADA: coloca o motoboy ativo na fila da loja;
@@ -2797,7 +2797,7 @@ def _sincronizar_fila_catraca(conn, forcar=False):
     emap_in = db.mapa_equip_loja(conn)       # catracas de entrada
     emap_out = db.mapa_equip_saida(conn)     # catracas de saída
     try:
-        eventos = dmp.ler_acessos_periodo(d_ini, amanha, 0) or []
+        eventos = dmp.ler_acessos_periodo(d_ini, amanha, 3) or []   # logType 3 = retorna tudo
     except Exception as e:
         return {"lido": 0, "add": 0, "erro": str(e)}
     add = sai = com_catraca = novos = com_ativo = 0
@@ -2818,6 +2818,15 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             ultimo_ev = _te
         _stt = ev.get("AccessValidationStatus")
         status_vistos[str(_stt)] = status_vistos.get(str(_stt), 0) + 1
+        # Só passagens CONCLUÍDAS entram na lógica da fila:
+        #   10 = Acesso Concluído · 12 = Acesso Concluído em Batch.
+        # Ignora: 1=permitido (ainda não passou), 6=bloqueado, 8=não concluído.
+        try:
+            _stt_i = int(_stt)
+        except (TypeError, ValueError):
+            _stt_i = None
+        if _stt_i not in (10, 12):
+            continue
         equip_in = equip in emap_in
         equip_out = equip in emap_out
         # MESMA leitora nos dois campos = modo de teste com uma catraca só:
@@ -2852,14 +2861,13 @@ def _sincronizar_fila_catraca(conn, forcar=False):
             eh_saida = bool(_na_fila)
         else:
             eh_saida = equip_out
-        agora = db._agora_br()           # horário BR do portal (p/ a fila / "esperando")
-        hora_ev = _hora_do_evento(ev) or agora   # hora REAL da passagem (p/ relatórios/KPIs)
+        hora_ev = _hora_do_evento(ev) or db._agora_br()   # hora REAL da passagem (relógio da leitora)
         if eh_saida:                     # passou na SAÍDA → tira da fila
             if db.sair_da_fila(conn, loja_id, mb["motoboy_id"]):
                 sai += 1
             _tipo = "saida"
         else:                            # passou na ENTRADA → entra na fila
-            if db.registrar_chegada(conn, loja_id, mb["motoboy_id"], chegada_em=agora):
+            if db.registrar_chegada(conn, loja_id, mb["motoboy_id"], chegada_em=hora_ev):
                 add += 1
             _tipo = "entrada"
         # acesso_eventos = histórico bruto p/ relatórios: guarda a HORA REAL do evento
