@@ -1236,7 +1236,7 @@ def tela_ol(usuario):
             st.info("Cadastre seus motoboys primeiro (aba **Novo cadastro**) "
                     "para poder enviar a prestação de contas.")
         else:
-            obrigatorios = db.get_docs_obrigatorios(conn)
+            obrigatorios = db.get_docs_obrigatorios(conn, ol_id)
 
             # ---- Relação de entregadores: o que falta enviar (por competência) ----
             with st.container(border=True):
@@ -1671,17 +1671,39 @@ def tela_admin(usuario):
                     st.code(p["resposta"], language=None)
 
     with st.expander("📑 Documentos obrigatórios (prestação de contas)"):
-        st.caption("Marque os tipos de documento que TODO motoboy deve enviar por "
-                   "competência. O portal usa isso para mostrar, na relação de "
-                   "entregadores da OL, o que está faltando.")
-        _atuais_ob = db.get_docs_obrigatorios(conn)
+        st.caption("Marque os tipos de documento que cada OL deve enviar por competência. "
+                   "Como cada OL tem um padrão (ex.: contracheque já com periculosidade e "
+                   "desconto de alimentação), dá para configurar **por OL**. O **Padrão "
+                   "geral** vale para toda OL que não tiver lista própria.")
+        _ols_ob = conn.execute("SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall()
+        _opts_ob = ["Padrão geral (todas as OLs)"] + [o["nome"] for o in _ols_ob]
+        _alvo = st.selectbox("Configurar para", _opts_ob, key="adm_docs_alvo")
+        _ol_alvo = None
+        if _alvo != "Padrão geral (todas as OLs)":
+            _ol_alvo = next((o["id"] for o in _ols_ob if o["nome"] == _alvo), None)
+
+        # Mostra se a OL usa lista própria ou herda o padrão geral.
+        if _ol_alvo is not None:
+            if db.tem_docs_obrigatorios_proprios(conn, _ol_alvo):
+                st.caption("✏️ Esta OL tem **lista própria**.")
+            else:
+                st.caption("↩️ Esta OL **herda o Padrão geral** (salve para criar uma "
+                           "lista própria).")
+        _atuais_ob = db.get_docs_obrigatorios(conn, _ol_alvo)
         _sel_ob = st.multiselect(
             "Documentos obrigatórios", TIPOS_DOCUMENTO,
-            default=[t for t in _atuais_ob if t in TIPOS_DOCUMENTO], key="adm_docs_ob")
-        if st.button("Salvar obrigatórios", key="adm_docs_ob_btn", type="primary"):
-            db.set_docs_obrigatorios(conn, _sel_ob)
-            st.success("Documentos obrigatórios atualizados.")
+            default=[t for t in _atuais_ob if t in TIPOS_DOCUMENTO],
+            key=f"adm_docs_ob_{_ol_alvo or 'geral'}")
+        cbo1, cbo2 = st.columns(2)
+        if cbo1.button("Salvar", key="adm_docs_ob_btn", type="primary"):
+            db.set_docs_obrigatorios(conn, _sel_ob, _ol_alvo)
+            st.success(f"Documentos obrigatórios atualizados para **{_alvo}**.")
             st.rerun()
+        if _ol_alvo is not None and db.tem_docs_obrigatorios_proprios(conn, _ol_alvo):
+            if cbo2.button("↩️ Voltar ao Padrão geral", key="adm_docs_ob_reset"):
+                db.remover_docs_obrigatorios_ol(conn, _ol_alvo)
+                st.success(f"**{_alvo}** voltou a herdar o Padrão geral.")
+                st.rerun()
 
     # Cadastro = registro existe. Situação de acesso = ativo/inativo no DMP.
     tot_mb = conn.execute("SELECT COUNT(*) FROM motoboys").fetchone()[0]
@@ -2257,14 +2279,18 @@ def tela_admin(usuario):
 
         # --- Resumo de inconsistências por OL + mensagem automática ----------
         with st.expander("📊 Resumo de inconsistências + mensagem à OL"):
-            _obrig = db.get_docs_obrigatorios(conn)
+            _ols_adm = conn.execute(
+                "SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall()
+            # há alguma lista configurada? (padrão geral OU específica de alguma OL)
+            _tem_config = bool(db.get_docs_obrigatorios(conn)) or any(
+                db.tem_docs_obrigatorios_proprios(conn, _o["id"]) for _o in _ols_adm)
             _comps_adm = conn.execute(
                 "SELECT DISTINCT competencia FROM prestacao_documentos "
                 "WHERE competencia IS NOT NULL "
                 "UNION SELECT DISTINCT competencia FROM prestacao_justificativas "
                 "WHERE competencia IS NOT NULL ORDER BY competencia DESC").fetchall()
             _lista_comp = [c["competencia"] for c in _comps_adm if c["competencia"]]
-            if not _obrig:
+            if not _tem_config:
                 st.info("Defina os **documentos obrigatórios** primeiro (expander no topo "
                         "do painel admin).")
             elif not _lista_comp:
@@ -2272,13 +2298,13 @@ def tela_admin(usuario):
             else:
                 _comp_adm = st.selectbox("Competência", _lista_comp, key="adm_resumo_comp")
                 resumo = []
-                for _o in conn.execute(
-                        "SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall():
+                for _o in _ols_adm:
                     _mbs = conn.execute(
                         "SELECT m.id FROM motoboys_ol mol JOIN motoboys m ON m.id=mol.motoboy_id "
                         "WHERE mol.ol_id=?", (_o["id"],)).fetchall()
                     if not _mbs:
                         continue
+                    _obrig = db.get_docs_obrigatorios(conn, _o["id"])   # lista DESTA OL
                     _env = db.enviados_por_motoboy_tipo(conn, _o["id"], _comp_adm)
                     _jus = db.justificativas_da_ol(conn, _o["id"], _comp_adm)
                     faltantes = 0

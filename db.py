@@ -795,14 +795,33 @@ def mapa_equip_saida(conn):
 
 # ---- Prestação de contas: documentos obrigatórios + justificativas --------
 
-def set_docs_obrigatorios(conn, lista):
-    """Lista de tipos de documento que TODO motoboy deve enviar por competência
-    (definida pelo admin). Guardada em configuracoes."""
-    set_config(conn, "docs_obrigatorios", "||".join(lista or []))
+def set_docs_obrigatorios(conn, lista, ol_id=None):
+    """Documentos obrigatórios por competência (definidos pelo admin).
+    ol_id=None → PADRÃO GERAL (vale para toda OL sem config própria);
+    ol_id preenchido → lista específica daquela OL (sobrepõe o padrão)."""
+    chave = "docs_obrigatorios" if ol_id is None else f"docs_obrigatorios_{ol_id}"
+    set_config(conn, chave, "||".join(lista or []))
     conn.commit()
 
 
-def get_docs_obrigatorios(conn):
+def tem_docs_obrigatorios_proprios(conn, ol_id):
+    """True se a OL tem uma lista PRÓPRIA configurada (mesmo que vazia)."""
+    return get_config(conn, f"docs_obrigatorios_{ol_id}", None) is not None
+
+
+def remover_docs_obrigatorios_ol(conn, ol_id):
+    """Remove a lista própria da OL → volta a herdar o Padrão geral."""
+    conn.execute("DELETE FROM configuracoes WHERE chave=?", (f"docs_obrigatorios_{ol_id}",))
+    conn.commit()
+
+
+def get_docs_obrigatorios(conn, ol_id=None):
+    """Lista efetiva de documentos obrigatórios. Se a OL tiver config própria,
+    usa a dela; senão, cai no PADRÃO GERAL."""
+    if ol_id is not None:
+        v = get_config(conn, f"docs_obrigatorios_{ol_id}", None)
+        if v is not None:                # OL tem config própria (pode ser vazia)
+            return [x for x in v.split("||") if x]
     v = get_config(conn, "docs_obrigatorios", "") or ""
     return [x for x in v.split("||") if x]
 
