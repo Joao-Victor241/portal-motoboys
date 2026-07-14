@@ -447,10 +447,11 @@ def _hash(senha: str) -> str:
 # Senhas dos usuários padrão vêm dos Secrets/.env (nunca ficam no código).
 # Se a variável não estiver definida, cai no fallback (mantém funcionando).
 _MAPA_SENHA_ENV = {
-    "admin":      ("ADMIN_PASSWORD", "admin123"),
-    "ol_exemplo": ("OL_EXEMPLO_PASSWORD", "ol123"),
-    "operador":   ("OPERADOR_PASSWORD", "op123"),
-    "financeiro": ("FINANCEIRO_PASSWORD", "fin123"),
+    "admin":       ("ADMIN_PASSWORD", "admin123"),
+    "ol_exemplo":  ("OL_EXEMPLO_PASSWORD", "ol123"),
+    "operador":    ("OPERADOR_PASSWORD", "op123"),
+    "conferencia": ("CONFERENCIA_PASSWORD", "conf123"),  # conferência de documentos
+    "financeiro":  ("FINANCEIRO_PASSWORD", "fin123"),    # faturas/boletos/NF
 }
 _SENHAS_SINCRONIZADAS = False
 
@@ -524,6 +525,10 @@ def inicializar():
         if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='financeiro'").fetchone()[0] == 0:
             conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
                          ("financeiro", _hash(_senha_padrao("financeiro")), "financeiro"))
+        # Perfil de conferência de documentos (novo nome do antigo "financeiro").
+        if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='conferencia'").fetchone()[0] == 0:
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("conferencia", _hash(_senha_padrao("conferencia")), "conferencia"))
         # Sincroniza senhas com os Secrets (1x por processo).
         if not _SENHAS_SINCRONIZADAS:
             for login, (chave, _fb) in _MAPA_SENHA_ENV.items():
@@ -619,6 +624,13 @@ def inicializar():
         try:
             conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
                          ("financeiro", _hash(_senha_padrao("financeiro")), "financeiro"))
+        except Exception:
+            pass
+    # Perfil de conferência de documentos (antigo "financeiro").
+    if conn.execute("SELECT COUNT(*) FROM usuarios WHERE login='conferencia'").fetchone()[0] == 0:
+        try:
+            conn.execute("INSERT INTO usuarios (login, senha_hash, perfil) VALUES (?,?,?)",
+                         ("conferencia", _hash(_senha_padrao("conferencia")), "conferencia"))
         except Exception:
             pass
 
@@ -813,6 +825,238 @@ def remover_docs_obrigatorios_ol(conn, ol_id):
     """Remove a lista própria da OL → volta a herdar o Padrão geral."""
     conn.execute("DELETE FROM configuracoes WHERE chave=?", (f"docs_obrigatorios_{ol_id}",))
     conn.commit()
+
+
+# ===========================================================================
+# FATURAMENTO: faturas por OL/competência + itens (entregadores) + boleto/NF
+# ===========================================================================
+
+_TABELAS_FATURAS_OK = False
+
+
+def garantir_tabelas_faturas(conn):
+    """Cria (se faltarem) as tabelas de faturamento. Idempotente."""
+    global _TABELAS_FATURAS_OK
+    if _TABELAS_FATURAS_OK:
+        return
+    pg = usando_pg()
+    serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    blob = "BYTEA" if pg else "BLOB"
+    val = "NUMERIC(12,2)" if pg else "REAL"
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS faturas ("
+        f" id {serial}, ol_id INTEGER NOT NULL REFERENCES ols(id), competencia TEXT NOT NULL,"
+        f" valor_calculado {val} DEFAULT 0, valor_final {val} DEFAULT 0,"
+        f" status TEXT NOT NULL DEFAULT 'rascunho',"          # rascunho/aprovada/reprovada
+        f" motivo TEXT, vencimento TEXT,"
+        f" aprovada_admin INTEGER NOT NULL DEFAULT 0, aprovada_fin INTEGER NOT NULL DEFAULT 0,"
+        f" boleto_nome TEXT, boleto_mime TEXT, boleto_arquivo {blob}, boleto_valor {val},"
+        f" nf_nome TEXT, nf_mime TEXT, nf_arquivo {blob}, nf_valor {val},"
+        f" conf_valor TEXT, enviado_forms INTEGER NOT NULL DEFAULT 0, forms_em TEXT,"
+        f" criado_em TEXT, atualizado_em TEXT,"
+        f" UNIQUE (ol_id, competencia))")
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS fatura_itens ("
+        f" id {serial}, fatura_id INTEGER NOT NULL REFERENCES faturas(id),"
+        f" motoboy_id INTEGER, nome TEXT, dias INTEGER DEFAULT 0,"
+        f" valor_diaria {val} DEFAULT 0, bonificacao {val} DEFAULT 0, subtotal {val} DEFAULT 0)")
+    conn.commit()
+    _TABELAS_FATURAS_OK = True
+
+
+def set_valor_diaria(conn, valor, ol_id=None):
+    """Valor da diária por entregador. ol_id=None → padrão geral; senão, da OL."""
+    chave = "valor_diaria" if ol_id is None else f"valor_diaria_{ol_id}"
+    set_config(conn, chave, str(valor or 0))
+    conn.commit()
+
+
+def get_valor_diaria(conn, ol_id=None):
+    if ol_id is not None:
+        v = get_config(conn, f"valor_diaria_{ol_id}", None)
+        if v is not None:
+            try: return float(v)
+            except ValueError: return 0.0
+    v = get_config(conn, "valor_diaria", "0") or "0"
+    try: return float(v)
+    except ValueError: return 0.0
+
+
+def get_fatura(conn, ol_id, competencia):
+    garantir_tabelas_faturas(conn)
+    return conn.execute("SELECT * FROM faturas WHERE ol_id=? AND competencia=?",
+                        (ol_id, competencia)).fetchone()
+
+
+def get_fatura_id(conn, fatura_id):
+    return conn.execute("SELECT * FROM faturas WHERE id=?", (fatura_id,)).fetchone()
+
+
+def itens_fatura(conn, fatura_id):
+    return conn.execute(
+        "SELECT * FROM fatura_itens WHERE fatura_id=? ORDER BY nome", (fatura_id,)).fetchall()
+
+
+def gerar_fatura(conn, ol_id, competencia, criado_por=None):
+    """Gera (ou regenera, se ainda em rascunho) a fatura da OL na competência:
+    um item por entregador ATIVO, com dias trabalhados (passagens de entrada no
+    mês) × diária. Preserva a bonificação já lançada. Não mexe se já aprovada."""
+    garantir_tabelas_faturas(conn)
+    fat = get_fatura(conn, ol_id, competencia)
+    if fat and fat["status"] == "aprovada":
+        return fat["id"]
+    diaria = get_valor_diaria(conn, ol_id)
+    agora = _agora_br()
+    if not fat:
+        if usando_pg():
+            fid = conn.execute(
+                "INSERT INTO faturas (ol_id, competencia, status, criado_em, atualizado_em) "
+                "VALUES (?,?,'rascunho',?,?) RETURNING id",
+                (ol_id, competencia, agora, agora)).fetchone()[0]
+        else:
+            fid = conn.execute(
+                "INSERT INTO faturas (ol_id, competencia, status, criado_em, atualizado_em) "
+                "VALUES (?,?,'rascunho',?,?)", (ol_id, competencia, agora, agora)).lastrowid
+        bonif_ant = {}
+    else:
+        fid = fat["id"]
+        bonif_ant = {r["motoboy_id"]: float(r["bonificacao"] or 0)
+                     for r in itens_fatura(conn, fid)}
+        conn.execute("DELETE FROM fatura_itens WHERE fatura_id=?", (fid,))
+    mbs = conn.execute(
+        "SELECT DISTINCT m.id, m.nome FROM cadastros c JOIN motoboys m ON m.id=c.motoboy_id "
+        "WHERE c.ol_id=? AND c.situacao='ativo' ORDER BY m.nome", (ol_id,)).fetchall()
+    total = 0.0
+    for m in mbs:
+        dias = conn.execute(
+            "SELECT COUNT(DISTINCT substr(ocorrido_em,1,10)) FROM acesso_eventos "
+            "WHERE motoboy_id=? AND tipo='entrada' AND ocorrido_em LIKE ?",
+            (m["id"], competencia + "%")).fetchone()[0] or 0
+        bonif = bonif_ant.get(m["id"], 0.0)
+        subtotal = dias * diaria + bonif
+        conn.execute(
+            "INSERT INTO fatura_itens (fatura_id, motoboy_id, nome, dias, valor_diaria, "
+            "bonificacao, subtotal) VALUES (?,?,?,?,?,?,?)",
+            (fid, m["id"], m["nome"], dias, diaria, bonif, subtotal))
+        total += subtotal
+    conn.execute("UPDATE faturas SET valor_calculado=?, valor_final=?, atualizado_em=? WHERE id=?",
+                 (total, total, agora, fid))
+    conn.commit()
+    return fid
+
+
+def atualizar_item_fatura(conn, item_id, dias, valor_diaria, bonificacao):
+    """Ajusta um item (admin/financeiro) e recalcula o subtotal + total da fatura."""
+    dias = int(dias or 0); vd = float(valor_diaria or 0); bn = float(bonificacao or 0)
+    sub = dias * vd + bn
+    row = conn.execute("SELECT fatura_id FROM fatura_itens WHERE id=?", (item_id,)).fetchone()
+    conn.execute("UPDATE fatura_itens SET dias=?, valor_diaria=?, bonificacao=?, subtotal=? WHERE id=?",
+                 (dias, vd, bn, sub, item_id))
+    if row:
+        _recalcular_fatura(conn, row["fatura_id"])
+    conn.commit()
+
+
+def set_bonificacao_item(conn, item_id, bonificacao):
+    """Atalho: lança só a bonificação de um entregador (admin)."""
+    it = conn.execute("SELECT dias, valor_diaria FROM fatura_itens WHERE id=?",
+                      (item_id,)).fetchone()
+    if it:
+        atualizar_item_fatura(conn, item_id, it["dias"], it["valor_diaria"], bonificacao)
+
+
+def _recalcular_fatura(conn, fatura_id):
+    tot = conn.execute("SELECT COALESCE(SUM(subtotal),0) FROM fatura_itens WHERE fatura_id=?",
+                       (fatura_id,)).fetchone()[0] or 0
+    conn.execute("UPDATE faturas SET valor_final=?, atualizado_em=? WHERE id=?",
+                 (float(tot), _agora_br(), fatura_id))
+
+
+def aprovar_fatura(conn, fatura_id, perfil, por=None):
+    """Aprovação da fatura por admin e/ou financeiro. Só vira 'aprovada' quando
+    AMBOS aprovarem (admin + financeiro)."""
+    col = "aprovada_admin" if perfil == "admin" else "aprovada_fin"
+    conn.execute(f"UPDATE faturas SET {col}=1, motivo=NULL, atualizado_em=? WHERE id=?",
+                 (_agora_br(), fatura_id))
+    f = get_fatura_id(conn, fatura_id)
+    if f and f["aprovada_admin"] and f["aprovada_fin"]:
+        conn.execute("UPDATE faturas SET status='aprovada' WHERE id=?", (fatura_id,))
+    conn.commit()
+
+
+def reprovar_fatura(conn, fatura_id, motivo, por=None):
+    conn.execute("UPDATE faturas SET status='reprovada', motivo=?, aprovada_admin=0, "
+                 "aprovada_fin=0, atualizado_em=? WHERE id=?",
+                 (motivo, _agora_br(), fatura_id))
+    conn.commit()
+
+
+def set_vencimento_fatura(conn, fatura_id, data):
+    conn.execute("UPDATE faturas SET vencimento=?, atualizado_em=? WHERE id=?",
+                 (str(data) if data else None, _agora_br(), fatura_id))
+    conn.commit()
+
+
+def anexar_boleto(conn, fatura_id, nome, mime, dados, valor):
+    conn.execute("UPDATE faturas SET boleto_nome=?, boleto_mime=?, boleto_arquivo=?, "
+                 "boleto_valor=?, atualizado_em=? WHERE id=?",
+                 (nome, mime, dados, float(valor or 0), _agora_br(), fatura_id))
+    conn.commit()
+    conferir_valor_fatura(conn, fatura_id)
+
+
+def anexar_nf(conn, fatura_id, nome, mime, dados, valor):
+    conn.execute("UPDATE faturas SET nf_nome=?, nf_mime=?, nf_arquivo=?, nf_valor=?, "
+                 "atualizado_em=? WHERE id=?",
+                 (nome, mime, dados, float(valor or 0), _agora_br(), fatura_id))
+    conn.commit()
+    conferir_valor_fatura(conn, fatura_id)
+
+
+def conferir_valor_fatura(conn, fatura_id):
+    """Confere automaticamente se o valor do boleto bate com o valor da fatura.
+    Grava 'ok' ou 'divergente' em conf_valor."""
+    f = get_fatura_id(conn, fatura_id)
+    if not f or f["boleto_valor"] is None:
+        return None
+    ok = abs(float(f["boleto_valor"]) - float(f["valor_final"] or 0)) < 0.01
+    res = "ok" if ok else "divergente"
+    conn.execute("UPDATE faturas SET conf_valor=? WHERE id=?", (res, fatura_id))
+    conn.commit()
+    return res
+
+
+def marcar_enviado_forms(conn, fatura_id):
+    conn.execute("UPDATE faturas SET enviado_forms=1, forms_em=? WHERE id=?",
+                 (_agora_br(), fatura_id))
+    conn.commit()
+
+
+def listar_faturas(conn, competencia=None):
+    garantir_tabelas_faturas(conn)
+    if competencia:
+        return conn.execute(
+            "SELECT f.*, o.nome AS ol FROM faturas f JOIN ols o ON o.id=f.ol_id "
+            "WHERE f.competencia=? ORDER BY o.nome", (competencia,)).fetchall()
+    return conn.execute(
+        "SELECT f.*, o.nome AS ol FROM faturas f JOIN ols o ON o.id=f.ol_id "
+        "ORDER BY f.competencia DESC, o.nome").fetchall()
+
+
+def progresso_conferencia(conn, ol_id, competencia):
+    """Progresso da conferência de documentos da OL na competência:
+    {total, validados, reprovados, pendentes, pct}. 'validados'=aprovados."""
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM prestacao_documentos "
+        "WHERE ol_id=? AND competencia=? GROUP BY status", (ol_id, competencia)).fetchall()
+    by = {r["status"]: r["n"] for r in rows}
+    total = sum(by.values())
+    validados = by.get("aprovado", 0) + by.get("validado", 0)
+    reprovados = by.get("rejeitado", 0) + by.get("reprovado", 0)
+    pendentes = total - validados - reprovados
+    pct = (validados / total) if total else 0.0
+    return {"total": total, "validados": validados, "reprovados": reprovados,
+            "pendentes": pendentes, "pct": pct}
 
 
 def get_docs_obrigatorios(conn, ol_id=None):

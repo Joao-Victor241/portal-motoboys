@@ -1,10 +1,10 @@
 """
 Portal de Motoboys — aplicação Streamlit (Fase 1).
 
-Login com 4 perfis (admin / ol / operador / financeiro), cadastro de motoboy
-pela OL com validações em tempo real, painel do Admin (limites, bloqueio
-cross-OL, cadastro de OLs), esboço do painel do operador e painel do financeiro
-(validação de documentos de prestação de contas por motoboy).
+Login com 5 perfis (admin / ol / operador / conferencia / financeiro), cadastro
+de motoboy pela OL com validações em tempo real, painel do Admin (limites,
+bloqueio cross-OL, cadastro de OLs), painel do operador (fila FIFO), conferência
+de documentos (aceitar/rejeitar) e financeiro (faturas, boletos e notas fiscais).
 
 Como rodar:
     pip install -r requirements.txt
@@ -388,7 +388,7 @@ def tela_ol(usuario):
     sec = st.radio(
         "Seção",
         ["➕ Novo cadastro", "✏️ Editar cadastro", "👥 Meus motoboys",
-         "📑 Prestação de contas"],
+         "📑 Prestação de contas", "💵 Faturas"],
         horizontal=True, key="ol_secao", label_visibility="collapsed")
 
     # =========================================================================
@@ -1466,6 +1466,73 @@ def tela_ol(usuario):
                     conn.commit()
                     st.rerun()
 
+    # =========================================================================
+    # SEÇÃO — Faturas (a OL vê a fatura e, quando aprovada, emite NF + boleto)
+    # =========================================================================
+    elif sec == "💵 Faturas":
+        db.garantir_tabelas_faturas(conn)
+        st.subheader("💵 Faturas e notas fiscais")
+        ol_id = usuario["ol_id"]
+        fc1, fc2 = st.columns(2)
+        _mes = fc1.selectbox("Mês", list(range(1, 13)), index=HOJE.month - 1,
+                             format_func=lambda m: f"{m:02d}", key="olfat_mes")
+        _ano = fc2.number_input("Ano", 2024, 2100, HOJE.year, key="olfat_ano")
+        _comp = f"{int(_ano):04d}-{int(_mes):02d}"
+        fat = db.get_fatura(conn, ol_id, _comp)
+        prog = db.progresso_conferencia(conn, ol_id, _comp)
+        if not fat:
+            st.info("Ainda não há fatura gerada para esta competência.")
+        else:
+            st.markdown(f"**Valor da fatura:** {_fmt_brl(fat['valor_final'])} · "
+                        f"status **{fat['status']}**")
+            liberado = fat["status"] == "aprovada" and _docs_ok_para_emitir(prog)
+            if fat["status"] == "reprovada":
+                st.error(f"Fatura reprovada pelo Grupo Bueno: {fat['motivo'] or '—'}")
+            if not liberado:
+                st.warning("⏳ Aguardando a aprovação dos **documentos** e da **fatura** pelo "
+                           "Grupo Bueno. Quando as duas forem aprovadas, aqui libera a emissão "
+                           "da nota fiscal e do boleto.")
+            else:
+                _venc = fat["vencimento"] or "a combinar"
+                st.success(f"✅ Aprovado! Emita a **nota fiscal** e o **boleto** no valor de "
+                           f"**{_fmt_brl(fat['valor_final'])}**, com vencimento **{_venc}**, e "
+                           "anexe abaixo.")
+                bcol1, bcol2 = st.columns(2)
+                with bcol1:
+                    b_val = st.number_input(
+                        "Valor do boleto (R$)", min_value=0.0,
+                        value=float(fat["boleto_valor"] or fat["valor_final"] or 0),
+                        step=1.0, key="ol_bol_val")
+                    b_file = st.file_uploader("Boleto (PDF)", type=["pdf"], key="ol_bol_file")
+                    if st.button("Anexar boleto", key="ol_bol_btn", use_container_width=True):
+                        if b_file:
+                            db.anexar_boleto(conn, fat["id"], b_file.name, b_file.type,
+                                             b_file.getvalue(), b_val)
+                            st.rerun()
+                        else:
+                            st.warning("Escolha o arquivo do boleto.")
+                with bcol2:
+                    n_val = st.number_input(
+                        "Valor da nota fiscal (R$)", min_value=0.0,
+                        value=float(fat["nf_valor"] or fat["valor_final"] or 0),
+                        step=1.0, key="ol_nf_val")
+                    n_file = st.file_uploader("Nota fiscal (PDF)", type=["pdf"], key="ol_nf_file")
+                    if st.button("Anexar nota fiscal", key="ol_nf_btn", use_container_width=True):
+                        if n_file:
+                            db.anexar_nf(conn, fat["id"], n_file.name, n_file.type,
+                                         n_file.getvalue(), n_val)
+                            st.rerun()
+                        else:
+                            st.warning("Escolha o arquivo da nota fiscal.")
+                if fat["boleto_arquivo"]:
+                    cf = fat["conf_valor"]
+                    st.caption("📎 Boleto anexado. " + (
+                        "✅ Valor confere com a fatura." if cf == "ok"
+                        else "⚠️ O valor do boleto DIVERGE da fatura — confira." if cf == "divergente"
+                        else ""))
+                if fat["nf_arquivo"]:
+                    st.caption("📎 Nota fiscal anexada.")
+
     conn.close()
 
 
@@ -1785,9 +1852,13 @@ def tela_admin(usuario):
             else:
                 st.info("Nada para remover — portal e DMP já estão sincronizados.")
 
-    aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest, aba_trein = st.tabs(
+    (aba_ols, aba_lim, aba_bloq, aba_base, aba_rel, aba_prest,
+     aba_fat, aba_trein) = st.tabs(
         ["Cadastrar OLs", "Limites de acesso ativo", "Bloqueio permanente",
-         "Base completa", "📊 Relatórios", "📑 Prestações", "🎥 Treinamento"])
+         "Base completa", "📊 Relatórios", "📑 Prestações", "💵 Faturas", "🎥 Treinamento"])
+
+    with aba_fat:
+        _render_faturas(conn, usuario)
 
     # --- Vídeo de treinamento (aparece no link da selfie) ---
     with aba_trein:
@@ -2550,10 +2621,210 @@ def _bloco_validacao(conn, dados, mime, nome, cur, key_prefix, salvar_fn):
                 st.caption(f"Validado em: {cur['validado_em']}")
 
 
+def _fmt_brl(v):
+    """Formata número como moeda BR: 1234.5 → 'R$ 1.234,50'."""
+    try:
+        s = f"{float(v or 0):,.2f}"
+    except (TypeError, ValueError):
+        s = "0.00"
+    return "R$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _docs_ok_para_emitir(prog):
+    """Documentos 'aprovados' para liberar a emissão: houve envio e nada
+    pendente nem reprovado."""
+    return prog["total"] > 0 and prog["pendentes"] == 0 and prog["reprovados"] == 0
+
+
+def _render_faturas(conn, usuario):
+    """Tela compartilhada (admin + financeiro): gera/confere faturas por OL,
+    acompanha a conferência de documentos, aprova/reprova, define vencimento,
+    baixa boleto/NF e encaminha ao forms de pagamento."""
+    db.garantir_tabelas_faturas(conn)
+    perfil = usuario["perfil"]
+    st.markdown("#### 💵 Faturas por OL")
+    st.caption("A fatura é gerada dos cadastros: entregadores ativos × dias trabalhados "
+               "(passagens de entrada no mês) × diária, + bonificações. Admin e financeiro "
+               "podem ajustar e precisam **os dois aprovar**.")
+
+    c1, c2 = st.columns(2)
+    mes = c1.selectbox("Mês", list(range(1, 13)), index=HOJE.month - 1,
+                       format_func=lambda m: f"{m:02d}", key="fat_mes")
+    ano = c2.number_input("Ano", 2024, 2100, HOJE.year, key="fat_ano")
+    comp = f"{int(ano):04d}-{int(mes):02d}"
+
+    ols = conn.execute("SELECT id, nome FROM ols WHERE ativo=1 ORDER BY nome").fetchall()
+
+    # ---- Resumo por OL (visão geral) --------------------------------------
+    resumo = []
+    for o in ols:
+        prog = db.progresso_conferencia(conn, o["id"], comp)
+        fat = db.get_fatura(conn, o["id"], comp)
+        resumo.append({
+            "OL": o["nome"],
+            "Docs validados": f"{prog['validados']}/{prog['total']}"
+                              + (f" ({prog['reprovados']}✗)" if prog["reprovados"] else ""),
+            "Conferência": f"{int(prog['pct'] * 100)}%",
+            "Fatura": (fat["status"] if fat else "—"),
+            "Valor": _fmt_brl(fat["valor_final"]) if fat else "—",
+            "Boleto": ("✅" if fat and fat["conf_valor"] == "ok"
+                       else "⚠️" if fat and fat["conf_valor"] == "divergente"
+                       else "—"),
+        })
+    st.dataframe(resumo, use_container_width=True, hide_index=True)
+
+    # ---- Detalhe por OL ----------------------------------------------------
+    for o in ols:
+        prog = db.progresso_conferencia(conn, o["id"], comp)
+        fat = db.get_fatura(conn, o["id"], comp)
+        rot = f"🏢 {o['nome']} — {comp}"
+        if fat:
+            rot += f" · fatura {fat['status']} · {_fmt_brl(fat['valor_final'])}"
+        with st.expander(rot):
+            # Progresso da conferência de documentos (barra)
+            st.progress(prog["pct"],
+                        text=f"Documentos: {prog['validados']}/{prog['total']} validados"
+                        + (f" · {prog['reprovados']} reprovado(s)" if prog["reprovados"] else "")
+                        + (f" · {prog['pendentes']} pendente(s)" if prog["pendentes"] else ""))
+
+            # Diária por entregador (base do cálculo)
+            diaria = db.get_valor_diaria(conn, o["id"])
+            d1, d2 = st.columns([3, 1])
+            nova_d = d1.number_input("Diária por entregador (R$)", min_value=0.0,
+                                     value=float(diaria), step=1.0, key=f"diaria_{o['id']}")
+            if d2.button("Salvar diária", key=f"savediaria_{o['id']}",
+                         use_container_width=True):
+                db.set_valor_diaria(conn, nova_d, o["id"])
+                st.rerun()
+
+            if st.button("🧾 Gerar / atualizar fatura", key=f"genfat_{o['id']}",
+                         type="primary"):
+                db.gerar_fatura(conn, o["id"], comp, usuario["id"])
+                st.rerun()
+
+            if not fat:
+                st.info("Fatura ainda não gerada nesta competência.")
+                continue
+
+            fid = fat["id"]
+            itens = db.itens_fatura(conn, fid)
+            if itens:
+                dados_ed = [{"item_id": it["id"], "Entregador": it["nome"],
+                             "Dias": int(it["dias"] or 0),
+                             "Diária": float(it["valor_diaria"] or 0),
+                             "Bonificação": float(it["bonificacao"] or 0),
+                             "Subtotal": float(it["subtotal"] or 0)} for it in itens]
+                edit = st.data_editor(
+                    dados_ed, key=f"ed_{fid}", hide_index=True, use_container_width=True,
+                    disabled=["item_id", "Entregador", "Subtotal"],
+                    column_config={"item_id": None})
+                if st.button("💾 Salvar ajustes (dias / diária / bonificação)",
+                             key=f"saveit_{fid}"):
+                    for r in edit:
+                        db.atualizar_item_fatura(conn, r["item_id"], r["Dias"],
+                                                 r["Diária"], r["Bonificação"])
+                    st.success("Itens atualizados.")
+                    st.rerun()
+            st.markdown(f"### Total: {_fmt_brl(fat['valor_final'])}")
+
+            # Status de aprovação
+            st.write(f"**Status:** {fat['status']}  ·  admin "
+                     f"{'✅' if fat['aprovada_admin'] else '⬜'}  ·  financeiro "
+                     f"{'✅' if fat['aprovada_fin'] else '⬜'}")
+            if fat["status"] == "reprovada" and fat["motivo"]:
+                st.error(f"Reprovada: {fat['motivo']}")
+
+            # Vencimento
+            _venc_ini = HOJE + timedelta(days=7)
+            try:
+                if fat["vencimento"]:
+                    _venc_ini = datetime.strptime(str(fat["vencimento"])[:10], "%Y-%m-%d").date()
+            except Exception:
+                pass
+            v1, v2 = st.columns([3, 1])
+            venc = v1.date_input("Vencimento do boleto", value=_venc_ini,
+                                 key=f"venc_{fid}", format="DD/MM/YYYY")
+            if v2.button("Salvar data", key=f"savevenc_{fid}", use_container_width=True):
+                db.set_vencimento_fatura(conn, fid, venc)
+                st.rerun()
+
+            # Aprovar / reprovar (por perfil)
+            a1, a2 = st.columns(2)
+            if a1.button(f"✅ Aprovar fatura ({perfil})", key=f"apfat_{fid}",
+                         type="primary", use_container_width=True):
+                db.aprovar_fatura(conn, fid, perfil, usuario["id"])
+                st.rerun()
+            _mot = a2.text_input("Motivo da reprovação", key=f"motfat_{fid}",
+                                 placeholder="motivo (obrigatório)", label_visibility="collapsed")
+            if a2.button("❌ Reprovar fatura", key=f"repfat_{fid}", use_container_width=True):
+                if _mot.strip():
+                    db.reprovar_fatura(conn, fid, _mot.strip(), usuario["id"])
+                    st.rerun()
+                else:
+                    st.warning("Escreva o motivo da reprovação.")
+
+            # Liberação para a OL emitir
+            if fat["status"] == "aprovada" and _docs_ok_para_emitir(prog):
+                st.success("✅ Documentos + fatura aprovados — a OL está liberada para "
+                           "emitir a nota fiscal e o boleto.")
+            elif fat["status"] == "aprovada":
+                st.warning("Fatura aprovada, mas a conferência de documentos ainda não "
+                           "está completa — a OL só é liberada com as duas aprovações.")
+
+            # Boleto / NF enviados pela OL + conferência de valor + download
+            if fat["boleto_arquivo"] or fat["nf_arquivo"]:
+                st.divider()
+                cf = fat["conf_valor"]
+                cf_txt = ("✅ valor bate com a fatura" if cf == "ok"
+                          else "⚠️ VALOR DIVERGENTE da fatura" if cf == "divergente" else "—")
+                if fat["boleto_arquivo"]:
+                    st.write(f"**Boleto:** {fat['boleto_nome']} · "
+                             f"{_fmt_brl(fat['boleto_valor'])} · {cf_txt}")
+                    st.download_button("⬇️ Baixar boleto", bytes(fat["boleto_arquivo"]),
+                                       file_name=fat["boleto_nome"] or "boleto.pdf",
+                                       key=f"dlbol_{fid}")
+                if fat["nf_arquivo"]:
+                    st.write(f"**Nota fiscal:** {fat['nf_nome']} · {_fmt_brl(fat['nf_valor'])}")
+                    st.download_button("⬇️ Baixar nota fiscal", bytes(fat["nf_arquivo"]),
+                                       file_name=fat["nf_nome"] or "nota_fiscal.pdf",
+                                       key=f"dlnf_{fid}")
+
+            # Enviar ao forms de pagamento (admin)
+            if perfil == "admin" and fat["boleto_arquivo"] and fat["nf_arquivo"]:
+                st.divider()
+                _url = db.get_config(conn, "forms_pagamento_url", "") or ""
+                fu1, fu2 = st.columns([3, 1])
+                novo_url = fu1.text_input("Link do forms de pagamento", value=_url,
+                                          key=f"formsurl_{fid}",
+                                          placeholder="https://forms...")
+                if fu2.button("Salvar link", key=f"saveurl_{fid}", use_container_width=True):
+                    db.set_config(conn, "forms_pagamento_url", novo_url.strip())
+                    conn.commit()
+                    st.rerun()
+                if _url:
+                    st.markdown(f"[🔗 Abrir forms de pagamento]({_url}) — baixe o boleto/NF "
+                                "acima e anexe no forms para subir a solicitação de pagamento.")
+                if st.button("📨 Marcar como enviado ao forms", key=f"formsok_{fid}"):
+                    db.marcar_enviado_forms(conn, fid)
+                    st.success("Marcado como enviado ao forms de pagamento.")
+                    st.rerun()
+                if fat["enviado_forms"]:
+                    st.caption(f"✅ Enviado ao forms em {fat['forms_em']}.")
+
+
 def tela_financeiro(usuario):
-    st.header("💰 Financeiro — Validação de documentos")
-    st.caption("Confira e valide os documentos enviados pelas OLs, separados por motoboy, "
-               "sem sair do portal.")
+    st.header("💰 Financeiro — Faturas, boletos e notas fiscais")
+    st.caption("Gera e confere as faturas das OLs, acompanha a conferência de documentos "
+               "e valida boleto e nota fiscal.")
+    conn = db.conectar()
+    db.garantir_tabelas_prestacao(conn)
+    _render_faturas(conn, usuario)
+
+
+def tela_conferencia(usuario):
+    st.header("📑 Conferência de documentos")
+    st.caption("Confira e valide os documentos enviados pelas OLs, separados por motoboy — "
+               "aceitar ou rejeitar cada documento, sem sair do portal.")
 
     conn = db.conectar()
     db.garantir_tabelas_prestacao(conn)
@@ -3642,6 +3913,8 @@ def main():
         tela_admin(usuario)
     elif usuario["perfil"] == "ol":
         tela_ol(usuario)
+    elif usuario["perfil"] == "conferencia":
+        tela_conferencia(usuario)
     elif usuario["perfil"] == "financeiro":
         tela_financeiro(usuario)
     else:
