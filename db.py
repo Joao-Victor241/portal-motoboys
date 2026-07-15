@@ -1350,8 +1350,11 @@ def garantir_tabelas_prestacao(conn):
         ("validado_em", "TEXT"),                  # data/hora da validação
     ]
     _cols_arqs = [("status", "TEXT DEFAULT 'pendente'")] + _cols_val
+    # motoboy_nome: nome digitado quando o motoboy NÃO está cadastrado (uso da
+    # conferência antecipada, antes de as OLs cadastrarem).
+    _cols_doc = _cols_val + [("motoboy_nome", "TEXT")]
     for tabela, colunas in (("prestacao_valores", _cols_valores),
-                            ("prestacao_documentos", _cols_val),
+                            ("prestacao_documentos", _cols_doc),
                             ("prestacao_arquivos", _cols_arqs)):
         for nome_col, tipo_col in colunas:
             if pg:
@@ -1380,19 +1383,22 @@ def set_config(conn, chave, valor):
                      "ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor", (chave, valor))
 
 
-def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, arquivos, valores, criado_por):
+def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, arquivos, valores,
+                     criado_por, motoboy_nome=None):
     """Salva um documento de prestação de contas (com 1+ arquivos) + os valores.
     arquivos: lista de tuplas (nome, mime, bytes).
     valores:  lista de tuplas (motoboy_id, tipo, valor).
+    motoboy_nome: nome livre do motoboy quando ele NÃO está cadastrado.
     Devolve o id do documento."""
     primeiro_nome = arquivos[0][0] if arquivos else None
     primeiro_mime = arquivos[0][1] if arquivos else None
     doc_id = _inserir_id(
         conn,
         "INSERT INTO prestacao_documentos "
-        "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, criado_por) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (ol_id, tipo, competencia, escopo, primeiro_nome, primeiro_mime, criado_por))
+        "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, criado_por, motoboy_nome) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (ol_id, tipo, competencia, escopo, primeiro_nome, primeiro_mime, criado_por,
+         motoboy_nome))
     for nome, mime, dados in arquivos:
         conn.execute(
             "INSERT INTO prestacao_arquivos (documento_id, nome_arquivo, mime, arquivo) "
@@ -1438,6 +1444,8 @@ def validar_arquivo(conn, arquivo_id, legivel, assinatura, valor_ok, status, obs
             "SELECT status FROM prestacao_arquivos WHERE documento_id=?", (did,)).fetchall()]
         if any(s == "rejeitado" for s in sts):
             resumo = "rejeitado"
+        elif any(s == "correcao" for s in sts):
+            resumo = "correcao"
         elif sts and all(s == "validado" for s in sts):
             resumo = "validado"
         else:

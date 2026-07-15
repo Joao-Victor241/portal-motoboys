@@ -115,7 +115,8 @@ HOJE = date.today()
 
 # Tipos de documento da prestação de contas (usado na OL e no admin).
 TIPOS_DOCUMENTO = [
-    "Contracheque", "Periculosidade", "Vale alimentação", "Aluguel da moto",
+    "Contracheque", "Contracheque c/ periculosidade + alimentação",
+    "Periculosidade", "Vale alimentação", "Bonificação", "Aluguel da moto",
     "Combustível", "Guia FGTS / RE", "Férias e recibos",
     "Atestado / INSS (afastamento)", "Rescisão", "13º salário", "Pendências",
 ]
@@ -1233,9 +1234,10 @@ def tela_ol(usuario):
         ).fetchall()
 
         if not motoboys_ol:
-            st.info("Cadastre seus motoboys primeiro (aba **Novo cadastro**) "
-                    "para poder enviar a prestação de contas.")
-        else:
+            st.info("Ainda não há motoboys cadastrados nesta OL — tudo bem: você pode "
+                    "enviar documentos **digitando o nome do motoboy** (escopo "
+                    "**Vários motoboys (digitar nomes)**), sem precisar cadastrar antes.")
+        if True:
             obrigatorios = db.get_docs_obrigatorios(conn, ol_id)
 
             # ---- Relação de entregadores: o que falta enviar (por competência) ----
@@ -1317,96 +1319,161 @@ def tela_ol(usuario):
 
                 escopo = st.radio(
                     "Este documento é de:",
-                    ["Um motoboy", "Geral (todos os motoboys)"],
-                    horizontal=True, key="pc_escopo",
+                    ["Um motoboy (cadastrado)", "Vários motoboys (digitar nomes)",
+                     "Geral (todos os motoboys)"],
+                    key="pc_escopo",
                 )
-                escopo_db = "geral" if escopo.startswith("Geral") else "individual"
 
-                # Motoboy (quando individual)
-                mb_id_sel = None
-                if escopo_db == "individual":
-                    mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
-                    mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
-                    mb_id_sel = mapa_mb[mb_nome]
+                def _renomear(files, base, tipo_final, competencia):
+                    """Renomeia p/ 'Nome - Tipo - AAAA-MM (n).ext' e devolve tuplas."""
+                    out, total = [], len(files)
+                    for _i, f in enumerate(files):
+                        _ext = os.path.splitext(f.name)[1] or ""
+                        _suf = f" ({_i + 1})" if total > 1 else ""
+                        _nome = (f"{base} - {tipo_final} - {competencia}{_suf}{_ext}"
+                                 ).replace("/", "-").replace("\\", "-")
+                        out.append((_nome, f.type or "application/octet-stream", f.getvalue()))
+                    return out
 
-                valores_pendentes = []     # (motoboy_id, tipo, valor)
-                tipos_sel = []
-                if eh_outros:
-                    # Arquivo único com vários documentos: marca quais e o valor de cada um.
-                    tipos_sel = st.multiselect(
-                        "Quais documentos estão neste arquivo?", TIPOS_DOC, key="pc_outros_tipos")
-                    if tipos_sel:
-                        st.caption("Informe o valor de cada documento contido no arquivo:")
-                        for t in tipos_sel:
-                            v = st.number_input(f"Valor — {t} (R$)", min_value=0.0, step=10.0,
-                                                format="%.2f", key=f"pc_outros_val_{t}")
-                            valores_pendentes.append((mb_id_sel, t, v))
-                elif escopo_db == "individual":
-                    valor = st.number_input("Valor (R$) — deixe 0 se o documento não tiver valor",
-                                            min_value=0.0, step=10.0, format="%.2f", key="pc_valor")
-                    valores_pendentes = [(mb_id_sel, tipo_doc, valor)]
-                else:
-                    st.caption("Informe o valor de cada motoboy (deixe 0 nos que não se aplicam).")
-                    ids_ordem = [m["id"] for m in motoboys_ol]
-                    linhas = [{"Motoboy": m["nome"], "Valor (R$)": 0.0} for m in motoboys_ol]
-                    editado = st.data_editor(
-                        linhas, hide_index=True, use_container_width=True, key="pc_editor",
-                        column_config={
-                            "Motoboy": st.column_config.TextColumn(disabled=True),
-                            "Valor (R$)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
-                        },
-                    )
-                    rows = editado if isinstance(editado, list) else editado.to_dict("records")
-                    valores_pendentes = [(ids_ordem[i], tipo_doc, r.get("Valor (R$)") or 0.0)
-                                         for i, r in enumerate(rows)]
+                # =====================================================================
+                # MODO: vários motoboys digitando o nome (sem precisar estar cadastrado)
+                # =====================================================================
+                if escopo.startswith("Vários"):
+                    st.caption("Digite o nome de cada motoboy e anexe o(s) arquivo(s) dele. "
+                               "Cria **um envio por motoboy** — ótimo para rescisões em lote.")
+                    qtd = st.number_input("Quantos motoboys?", 1, 30, 1, step=1, key="pc_multi_n")
+                    linhas_multi = []
+                    for i in range(int(qtd)):
+                        with st.container(border=True):
+                            nome_i = st.text_input(f"Nome do motoboy {i + 1}",
+                                                   key=f"pc_m_nome_{i}",
+                                                   placeholder="ex.: João da Silva")
+                            vcol, fcol = st.columns([1, 2])
+                            val_i = vcol.number_input("Valor (R$) — 0 se não tiver",
+                                                      min_value=0.0, step=10.0, format="%.2f",
+                                                      key=f"pc_m_val_{i}")
+                            files_i = fcol.file_uploader(
+                                "Arquivo(s)", type=["pdf", "jpg", "jpeg", "png"],
+                                accept_multiple_files=True, key=f"pc_m_file_{i}")
+                            linhas_multi.append((nome_i.strip(), val_i, files_i))
 
-                arquivos = st.file_uploader(
-                    "Arquivos (PDF ou imagem) — pode anexar mais de um",
-                    type=["pdf", "jpg", "jpeg", "png"],
-                    accept_multiple_files=True, key="pc_file")
-
-                if st.button("📤 Enviar documento", type="primary", use_container_width=True):
-                    if not arquivos:
-                        st.error("Anexe ao menos um arquivo.")
-                    elif eh_outros and not tipos_sel:
-                        st.error("Marque quais documentos estão contidos no arquivo.")
-                    else:
-                        # mantém só os valores informados (> 0); 0 = sem valor
-                        valores = [(mid, t, round(float(v), 2))
-                                   for mid, t, v in valores_pendentes if v and v > 0]
+                    if st.button("📤 Enviar documentos", type="primary",
+                                 use_container_width=True, key="pc_enviar_multi"):
                         tipo_final = "Outros" if eh_outros else tipo_doc
                         competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
-                        # Renomeia os arquivos: "Nome do motoboy - Tipo - AAAA-MM".
-                        base_nome = mb_nome if escopo_db == "individual" else "Geral"
-                        _total = len(arquivos)
-                        arquivos_dados = []
-                        for _i, f in enumerate(arquivos):
-                            _ext = os.path.splitext(f.name)[1] or ""
-                            _suf = f" ({_i + 1})" if _total > 1 else ""
-                            _nome_pad = (f"{base_nome} - {tipo_final} - {competencia}"
-                                         f"{_suf}{_ext}").replace("/", "-").replace("\\", "-")
-                            arquivos_dados.append(
-                                (_nome_pad, f.type or "application/octet-stream", f.getvalue()))
-                        try:
-                            doc_id = db.salvar_prestacao(
-                                conn, ol_id, tipo_final, competencia, escopo_db,
-                                arquivos_dados, valores, usuario["id"])
-                            db.auditar(conn, usuario["id"], "prestacao_contas",
-                                       "documento", doc_id,
-                                       f"{tipo_final} — {competencia} ({len(arquivos_dados)} arq.)")
-                            conn.commit()
-                            st.success(f"✅ Enviado! ({tipo_final} — {mes_sel}/{ano_sel}) · "
-                                       f"{len(arquivos_dados)} arquivo(s)")
+                        enviados, faltando = 0, 0
+                        for nome_i, val_i, files_i in linhas_multi:
+                            if not nome_i or not files_i:
+                                if nome_i or files_i:
+                                    faltando += 1
+                                continue
+                            arqs = _renomear(files_i, nome_i, tipo_final, competencia)
+                            vals = ([(None, tipo_final, round(float(val_i), 2))]
+                                    if val_i and val_i > 0 else [])
+                            try:
+                                doc_id = db.salvar_prestacao(
+                                    conn, ol_id, tipo_final, competencia, "individual",
+                                    arqs, vals, usuario["id"], motoboy_nome=nome_i)
+                                db.auditar(conn, usuario["id"], "prestacao_contas",
+                                           "documento", doc_id,
+                                           f"{nome_i} — {tipo_final} — {competencia}")
+                                enviados += 1
+                            except Exception as ex:
+                                st.error(f"Erro ao salvar '{nome_i}': {ex}")
+                        conn.commit()
+                        if enviados:
+                            _msg = f"✅ {enviados} envio(s) criado(s) ({tipo_final} — {mes_sel}/{ano_sel})."
+                            if faltando:
+                                _msg += f" {faltando} linha(s) incompleta(s) foram ignoradas."
+                            st.success(_msg)
                             st.rerun()
-                        except Exception as ex:
-                            st.error(f"Erro ao salvar: {ex}")
+                        else:
+                            st.error("Preencha ao menos um **nome** com **arquivo**.")
+
+                # =====================================================================
+                # MODO: um motoboy cadastrado  /  geral (fluxo original)
+                # =====================================================================
+                else:
+                    escopo_db = "geral" if escopo.startswith("Geral") else "individual"
+                    mb_id_sel, mb_nome = None, "Geral"
+                    if escopo_db == "individual":
+                        mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
+                        if not mapa_mb:
+                            st.warning("Nenhum motoboy cadastrado. Use **Vários motoboys "
+                                       "(digitar nomes)** acima.")
+                        else:
+                            mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
+                            mb_id_sel = mapa_mb[mb_nome]
+
+                    valores_pendentes, tipos_sel = [], []
+                    if eh_outros:
+                        tipos_sel = st.multiselect(
+                            "Quais documentos estão neste arquivo?", TIPOS_DOC,
+                            key="pc_outros_tipos")
+                        if tipos_sel:
+                            st.caption("Informe o valor de cada documento contido no arquivo:")
+                            for t in tipos_sel:
+                                v = st.number_input(f"Valor — {t} (R$)", min_value=0.0, step=10.0,
+                                                    format="%.2f", key=f"pc_outros_val_{t}")
+                                valores_pendentes.append((mb_id_sel, t, v))
+                    elif escopo_db == "individual":
+                        valor = st.number_input(
+                            "Valor (R$) — deixe 0 se o documento não tiver valor",
+                            min_value=0.0, step=10.0, format="%.2f", key="pc_valor")
+                        valores_pendentes = [(mb_id_sel, tipo_doc, valor)]
+                    else:
+                        st.caption("Informe o valor de cada motoboy (0 nos que não se aplicam).")
+                        ids_ordem = [m["id"] for m in motoboys_ol]
+                        linhas = [{"Motoboy": m["nome"], "Valor (R$)": 0.0} for m in motoboys_ol]
+                        editado = st.data_editor(
+                            linhas, hide_index=True, use_container_width=True, key="pc_editor",
+                            column_config={
+                                "Motoboy": st.column_config.TextColumn(disabled=True),
+                                "Valor (R$)": st.column_config.NumberColumn(min_value=0.0,
+                                                                            format="%.2f"),
+                            })
+                        rows = editado if isinstance(editado, list) else editado.to_dict("records")
+                        valores_pendentes = [(ids_ordem[i], tipo_doc, r.get("Valor (R$)") or 0.0)
+                                             for i, r in enumerate(rows)]
+
+                    arquivos = st.file_uploader(
+                        "Arquivos (PDF ou imagem) — pode anexar mais de um",
+                        type=["pdf", "jpg", "jpeg", "png"],
+                        accept_multiple_files=True, key="pc_file")
+
+                    if st.button("📤 Enviar documento", type="primary", use_container_width=True):
+                        if not arquivos:
+                            st.error("Anexe ao menos um arquivo.")
+                        elif eh_outros and not tipos_sel:
+                            st.error("Marque quais documentos estão contidos no arquivo.")
+                        else:
+                            valores = [(mid, t, round(float(v), 2))
+                                       for mid, t, v in valores_pendentes if v and v > 0]
+                            tipo_final = "Outros" if eh_outros else tipo_doc
+                            competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
+                            base_nome = mb_nome if escopo_db == "individual" else "Geral"
+                            arquivos_dados = _renomear(arquivos, base_nome, tipo_final, competencia)
+                            try:
+                                doc_id = db.salvar_prestacao(
+                                    conn, ol_id, tipo_final, competencia, escopo_db,
+                                    arquivos_dados, valores, usuario["id"],
+                                    motoboy_nome=(mb_nome if escopo_db == "individual" else None))
+                                db.auditar(conn, usuario["id"], "prestacao_contas",
+                                           "documento", doc_id,
+                                           f"{tipo_final} — {competencia} ({len(arquivos_dados)} arq.)")
+                                conn.commit()
+                                st.success(f"✅ Enviado! ({tipo_final} — {mes_sel}/{ano_sel}) · "
+                                           f"{len(arquivos_dados)} arquivo(s)")
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(f"Erro ao salvar: {ex}")
 
             # ---- Documentos já enviados ----
             st.divider()
             st.markdown("#### Documentos enviados")
             docs = conn.execute(
                 "SELECT pd.id, pd.tipo, pd.competencia, pd.escopo, pd.status, pd.criado_em, "
-                "pd.nome_arquivo, "
+                "pd.nome_arquivo, pd.motoboy_nome, "
                 "(SELECT COALESCE(SUM(pv.valor),0) FROM prestacao_valores pv "
                 " WHERE pv.documento_id=pd.id) AS total "
                 "FROM prestacao_documentos pd WHERE pd.ol_id=? ORDER BY pd.id DESC LIMIT 100",
@@ -1417,12 +1484,12 @@ def tela_ol(usuario):
                 st.caption("Nenhum documento enviado ainda.")
             else:
                 st.dataframe(
-                    [{"#": d["id"], "Tipo": d["tipo"],
+                    [{"#": d["id"], "Motoboy": d["motoboy_nome"] or "—", "Tipo": d["tipo"],
                       "Competência": d["competencia"] or "—",
                       "Escopo": "Geral" if d["escopo"] == "geral" else "Individual",
                       "Valor total": f"R$ {d['total']:.2f}" if d["total"] else "—",
-                      "Status": {"validado": "✅ Validado",
-                                 "rejeitado": "❌ Reprovado"}.get(d["status"], "🕒 Pendente"),
+                      "Status": {"validado": "✅ Validado", "rejeitado": "❌ Reprovado",
+                                 "correcao": "✏️ Corrigir"}.get(d["status"], "🕒 Pendente"),
                       "Enviado em": (d["criado_em"] or "")[:16].replace("T", " "),
                       "Arquivo": d["nome_arquivo"] or "—"}
                      for d in docs],
@@ -2583,8 +2650,8 @@ def _bloco_validacao(conn, dados, mime, nome, cur, key_prefix, salvar_fn):
     """Renderiza UM documento: preview (sem baixar) + checklist + validar/rejeitar,
     de forma independente dos demais. `cur` traz o estado atual (dict); `salvar_fn`
     (legivel, assinatura, valor_ok, status, obs) grava. Fecha a conexão antes do rerun."""
-    badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado"}.get(
-        cur.get("status"), "🕒 Pendente")
+    badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado",
+             "correcao": "✏️ Correção solicitada"}.get(cur.get("status"), "🕒 Pendente")
     with st.container(border=True):
         st.markdown(f"**{nome}** &nbsp; {badge}")
         cprev, cval = st.columns([3, 2])
@@ -2597,28 +2664,35 @@ def _bloco_validacao(conn, dados, mime, nome, cur, key_prefix, salvar_fn):
             else:
                 st.warning("Sem arquivo anexado.")
         with cval:
+            st.caption("Confira os itens (marque o que estiver OK):")
             c1 = st.checkbox("Documento legível / completo",
                              value=bool(cur.get("val_legivel")), key=f"leg_{key_prefix}")
-            c2 = st.checkbox("Assinatura confere",
+            c2 = st.checkbox("Assinatura / dados conferem",
                              value=bool(cur.get("val_assinatura")), key=f"ass_{key_prefix}")
-            c3 = st.checkbox("Valor confere",
+            c3 = st.checkbox("Valor / competência conferem",
                              value=bool(cur.get("val_valor")), key=f"val_{key_prefix}")
-            obs = st.text_area("Observação (opcional)", value=cur.get("obs_validacao") or "",
+            obs = st.text_area("Observação / motivo (aparece para a OL)",
+                               value=cur.get("obs_validacao") or "",
                                key=f"obs_{key_prefix}", height=90)
-            bok, brej = st.columns(2)
-            if bok.button("✅ Validar", type="primary", use_container_width=True,
-                          key=f"ok_{key_prefix}"):
+            if st.button("✅ Validar (aprovar documento)", type="primary",
+                         use_container_width=True, key=f"ok_{key_prefix}"):
                 salvar_fn(c1, c2, c3, "validado", obs.strip() or None)
                 st.toast("Documento validado ✅")
                 conn.close()
                 st.rerun()
-            if brej.button("❌ Rejeitar", use_container_width=True, key=f"rej_{key_prefix}"):
+            if st.button("✏️ Pedir correção / reenvio", use_container_width=True,
+                         key=f"cor_{key_prefix}"):
+                salvar_fn(c1, c2, c3, "correcao", obs.strip() or None)
+                st.toast("Correção solicitada ✏️")
+                conn.close()
+                st.rerun()
+            if st.button("❌ Rejeitar", use_container_width=True, key=f"rej_{key_prefix}"):
                 salvar_fn(c1, c2, c3, "rejeitado", obs.strip() or None)
                 st.toast("Documento rejeitado ❌")
                 conn.close()
                 st.rerun()
             if cur.get("validado_em"):
-                st.caption(f"Validado em: {cur['validado_em']}")
+                st.caption(f"Última ação em: {cur['validado_em']}")
 
 
 def _fmt_brl(v):
@@ -2868,7 +2942,9 @@ def tela_conferencia(usuario):
     filtro_ol = f1.selectbox("OL", ["Todas"] + list(ol_map.keys()), key="fin_ol")
     filtro_comp = f2.selectbox("Competência", ["Todas"] + [c["competencia"] for c in comps],
                                key="fin_comp")
-    filtro_status = f3.selectbox("Status", ["Todos", "Pendente", "Validado", "Rejeitado"],
+    _map_status = {"Pendente": "pendente", "Validado": "validado",
+                   "Rejeitado": "rejeitado", "Correção": "correcao"}
+    filtro_status = f3.selectbox("Status", ["Todos"] + list(_map_status.keys()),
                                  key="fin_status")
 
     where_pd, params_pd = [], []
@@ -2877,9 +2953,9 @@ def tela_conferencia(usuario):
     if filtro_comp != "Todas":
         where_pd.append("pd.competencia=?"); params_pd.append(filtro_comp)
     if filtro_status != "Todos":
-        where_pd.append("pd.status=?"); params_pd.append(filtro_status.lower())
+        where_pd.append("pd.status=?"); params_pd.append(_map_status[filtro_status])
 
-    # ---- Lista de motoboys com documentos ---------------------------------
+    # ---- Motoboys com documentos: CADASTRADOS + NOMES DIGITADOS (livres) --
     q_mb = ("SELECT DISTINCT m.id AS mid, m.nome AS nome FROM motoboys m "
             "JOIN prestacao_valores pv ON pv.motoboy_id=m.id "
             "JOIN prestacao_documentos pd ON pd.id=pv.documento_id")
@@ -2888,17 +2964,28 @@ def tela_conferencia(usuario):
     q_mb += " ORDER BY m.nome"
     motoboys = conn.execute(q_mb, params_pd).fetchall()
 
-    # Documentos "gerais" (sem motoboy específico) — ficam num grupo à parte.
+    # Nomes digitados (motoboys ainda não cadastrados).
+    q_nome = ("SELECT DISTINCT pd.motoboy_nome AS nome FROM prestacao_documentos pd "
+              "WHERE pd.motoboy_nome IS NOT NULL AND pd.motoboy_nome <> ''")
+    if where_pd:
+        q_nome += " AND " + " AND ".join(where_pd)
+    q_nome += " ORDER BY pd.motoboy_nome"
+    nomes_livres = [r["nome"] for r in conn.execute(q_nome, params_pd).fetchall()]
+
+    # Gerais = sem motoboy (nem cadastrado nem nome digitado).
     base_geral = ("FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
                   "WHERE pd.id NOT IN "
-                  "(SELECT documento_id FROM prestacao_valores WHERE motoboy_id IS NOT NULL)")
+                  "(SELECT documento_id FROM prestacao_valores WHERE motoboy_id IS NOT NULL) "
+                  "AND (pd.motoboy_nome IS NULL OR pd.motoboy_nome='')")
     if where_pd:
         base_geral += " AND " + " AND ".join(where_pd)
     geral_count = conn.execute("SELECT COUNT(*) " + base_geral, params_pd).fetchone()[0]
 
-    opcoes = [(f"👤 {m['nome']}", m["mid"]) for m in motoboys]
+    # value = ("id", motoboy_id) | ("nome", nome) | ("geral", None)
+    opcoes = [(f"👤 {m['nome']}", ("id", m["mid"])) for m in motoboys]
+    opcoes += [(f"✍️ {n}", ("nome", n)) for n in nomes_livres]
     if geral_count:
-        opcoes.append(("📋 Gerais (sem motoboy específico)", None))
+        opcoes.append(("📋 Gerais (sem motoboy específico)", ("geral", None)))
 
     if not opcoes:
         st.info("Nenhum documento enviado ainda (ou nenhum bate com os filtros).")
@@ -2906,17 +2993,25 @@ def tela_conferencia(usuario):
         return
 
     st.divider()
-    labels = [o[0] for o in opcoes]
-    escolha = st.selectbox("Motoboy", labels, key="fin_motoboy")
-    mid = dict((o[0], o[1]) for o in opcoes)[escolha]
+    escolha = st.selectbox("Motoboy", [o[0] for o in opcoes], key="fin_motoboy")
+    modo, chave = dict(opcoes)[escolha]
+    mid = chave if modo == "id" else None       # motoboy_id só quando cadastrado
 
-    # ---- Documentos do motoboy (ou gerais) selecionado --------------------
+    # ---- Documentos do selecionado ----------------------------------------
     cols_doc = ("pd.id, o.nome AS ol, pd.tipo, pd.competencia, pd.escopo, pd.status, "
-                "pd.criado_em, pd.val_legivel, pd.val_assinatura, pd.val_valor, "
-                "pd.obs_validacao, pd.validado_em")
-    if mid is None:
+                "pd.criado_em, pd.motoboy_nome, pd.val_legivel, pd.val_assinatura, "
+                "pd.val_valor, pd.obs_validacao, pd.validado_em")
+    if modo == "geral":
         docs = conn.execute(f"SELECT {cols_doc} {base_geral} ORDER BY pd.id DESC",
                             params_pd).fetchall()
+    elif modo == "nome":
+        q_docs = (f"SELECT {cols_doc} FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
+                  "WHERE pd.motoboy_nome=?")
+        p = [chave]
+        if where_pd:
+            q_docs += " AND " + " AND ".join(where_pd); p += params_pd
+        q_docs += " ORDER BY pd.id DESC"
+        docs = conn.execute(q_docs, p).fetchall()
     else:
         q_docs = (f"SELECT {cols_doc} FROM prestacao_documentos pd JOIN ols o ON o.id=pd.ol_id "
                   "WHERE pd.id IN (SELECT documento_id FROM prestacao_valores WHERE motoboy_id=?)")
@@ -2933,7 +3028,7 @@ def tela_conferencia(usuario):
 
     # ---- Navegação (passar de um documento para o outro) ------------------
     n = len(docs)
-    idx_key = f"fin_idx_{mid}"
+    idx_key = f"fin_idx_{escolha}"
     idx = max(0, min(st.session_state.get(idx_key, 0), n - 1))
 
     nav1, nav2, nav3 = st.columns([1, 2, 1])
@@ -2952,12 +3047,14 @@ def tela_conferencia(usuario):
     did = doc["id"]
 
     # ---- Cabeçalho do documento -------------------------------------------
-    status_badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado"}.get(
-        doc["status"], "🕒 Pendente")
+    status_badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado",
+                    "correcao": "✏️ Correção solicitada"}.get(doc["status"], "🕒 Pendente")
     st.markdown(f"### {doc['tipo']}  &nbsp; {status_badge}")
+    _mb_nome = doc["motoboy_nome"] or (escolha[2:] if escolha.startswith(("👤", "✍️")) else "")
     meta = f"**OL:** {doc['ol']}  ·  **Competência:** {doc['competencia'] or '—'}  ·  " \
-           f"**Escopo:** {'Geral' if doc['escopo'] == 'geral' else 'Individual'}  ·  " \
            f"**Enviado em:** {(doc['criado_em'] or '')[:16].replace('T', ' ')}"
+    if _mb_nome:
+        meta = f"**Motoboy:** {_mb_nome}  ·  " + meta
     st.markdown(meta)
 
     # Valores referentes a este motoboy (ou totais, se grupo geral)
