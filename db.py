@@ -1313,6 +1313,19 @@ def garantir_tabelas_prestacao(conn):
         f" lido INTEGER NOT NULL DEFAULT 0, criado_por INTEGER,"
         f" criado_em TEXT NOT NULL DEFAULT {ts})")
     conn.commit()
+    # motoboy_nome (nome livre, motoboy não cadastrado): a migração principal fica
+    # atrás da trava 1x/processo; quando o processo é reaproveitado após um deploy,
+    # ela não roda e dá UndefinedColumn. Garante SEMPRE (idempotente). Se a tabela
+    # ainda não existe (1º boot), o except ignora — a criação vem logo abaixo.
+    try:
+        if pg:
+            conn.execute("ALTER TABLE prestacao_documentos "
+                         "ADD COLUMN IF NOT EXISTS motoboy_nome TEXT")
+        else:
+            conn.execute("ALTER TABLE prestacao_documentos ADD COLUMN motoboy_nome TEXT")
+        conn.commit()
+    except Exception:
+        pass
     if _TABELAS_PRESTACAO_OK:
         return
     blob = "BYTEA" if pg else "BLOB"
