@@ -1294,12 +1294,13 @@ def garantir_tabelas_prestacao(conn):
     Roda só UMA vez por processo (evita DDL a cada abertura de tela — deixa o app
     muito mais rápido no PostgreSQL, onde cada comando é uma ida ao servidor)."""
     global _TABELAS_PRESTACAO_OK
+    if _TABELAS_PRESTACAO_OK:
+        return                            # 1x por processo — evita DDL a cada clique
     pg = usando_pg()
     serial = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     ts = "to_char(now(), 'YYYY-MM-DD HH24:MI:SS')" if pg else "CURRENT_TIMESTAMP"
-    # Tabelas independentes (justificativas de não envio + mensagens à OL): SEMPRE
-    # garante (CREATE IF NOT EXISTS é barato/idempotente) — robusto quando o app
-    # recarrega o código sem recriar o schema (evita UndefinedTable).
+    blob = "BYTEA" if pg else "BLOB"
+    valor_tipo = "NUMERIC(12,2)" if pg else "REAL"
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS prestacao_justificativas ("
         f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT NOT NULL,"
@@ -1312,24 +1313,6 @@ def garantir_tabelas_prestacao(conn):
         f" id {serial}, ol_id INTEGER NOT NULL, competencia TEXT, texto TEXT NOT NULL,"
         f" lido INTEGER NOT NULL DEFAULT 0, criado_por INTEGER,"
         f" criado_em TEXT NOT NULL DEFAULT {ts})")
-    conn.commit()
-    # motoboy_nome (nome livre, motoboy não cadastrado): a migração principal fica
-    # atrás da trava 1x/processo; quando o processo é reaproveitado após um deploy,
-    # ela não roda e dá UndefinedColumn. Garante SEMPRE (idempotente). Se a tabela
-    # ainda não existe (1º boot), o except ignora — a criação vem logo abaixo.
-    for _cc in ("motoboy_nome TEXT", "periodo_ini TEXT", "periodo_fim TEXT"):
-        try:
-            if pg:
-                conn.execute(f"ALTER TABLE prestacao_documentos ADD COLUMN IF NOT EXISTS {_cc}")
-            else:
-                conn.execute(f"ALTER TABLE prestacao_documentos ADD COLUMN {_cc}")
-            conn.commit()
-        except Exception:
-            pass
-    if _TABELAS_PRESTACAO_OK:
-        return
-    blob = "BYTEA" if pg else "BLOB"
-    valor_tipo = "NUMERIC(12,2)" if pg else "REAL"
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS prestacao_documentos ("
         f" id {serial}, ol_id INTEGER NOT NULL REFERENCES ols(id), tipo TEXT NOT NULL,"
@@ -1347,7 +1330,6 @@ def garantir_tabelas_prestacao(conn):
         f" id {serial}, documento_id INTEGER NOT NULL REFERENCES prestacao_documentos(id),"
         f" nome_arquivo TEXT, mime TEXT, arquivo {blob})")
     conn.execute("CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT)")
-    # (prestacao_justificativas e mensagens_ol já são criadas no topo desta função.)
     # Migração: adiciona a coluna 'tipo' em bancos que já tinham prestacao_valores sem ela.
     # Colunas de validação (perfil financeiro): checklist + status + observação + autoria.
     _cols_valores = [("tipo", "TEXT")]
