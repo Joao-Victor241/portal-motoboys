@@ -1308,32 +1308,60 @@ def tela_ol(usuario):
                 tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC + [OUTROS], key="pc_tipo")
                 eh_outros = tipo_doc == OUTROS
 
-                cm, ca = st.columns(2)
-                with cm:
-                    mes_sel = st.selectbox("Mês de referência", MESES,
-                                           index=HOJE.month - 1, key="pc_mes")
-                with ca:
-                    anos = list(range(HOJE.year - 1, HOJE.year + 2))
-                    ano_sel = st.selectbox("Ano", anos, index=anos.index(HOJE.year),
-                                           key="pc_ano")
+                # Período de referência: intervalo "de ... até ..."
+                cd1, cd2 = st.columns(2)
+                _ini = cd1.date_input("De", value=HOJE.replace(day=1), key="pc_de",
+                                      format="DD/MM/YYYY")
+                _fim = cd2.date_input("Até", value=HOJE, key="pc_ate", format="DD/MM/YYYY")
+                if _fim < _ini:
+                    st.warning("A data final é anterior à inicial — ajuste o período.")
+                competencia = _ini.strftime("%Y-%m")            # mantém agrupamento mensal
+                periodo_ini_s = _ini.strftime("%Y-%m-%d")
+                periodo_fim_s = _fim.strftime("%Y-%m-%d")
+                periodo_label = f"{_ini.strftime('%d-%m-%Y')} a {_fim.strftime('%d-%m-%Y')}"
 
                 escopo = st.radio(
                     "Este documento é de:",
                     ["Um motoboy (cadastrado)", "Vários motoboys (digitar nomes)",
-                     "Geral (todos os motoboys)"],
+                     "Por unidade (todos que rodaram)", "Geral (todos os motoboys)"],
                     key="pc_escopo",
                 )
 
-                def _renomear(files, base, tipo_final, competencia):
-                    """Renomeia p/ 'Nome - Tipo - AAAA-MM (n).ext' e devolve tuplas."""
+                def _renomear(files, base, tipo_final, label):
+                    """Renomeia p/ 'Nome - Tipo - período (n).ext' e devolve tuplas."""
                     out, total = [], len(files)
                     for _i, f in enumerate(files):
                         _ext = os.path.splitext(f.name)[1] or ""
                         _suf = f" ({_i + 1})" if total > 1 else ""
-                        _nome = (f"{base} - {tipo_final} - {competencia}{_suf}{_ext}"
+                        _nome = (f"{base} - {tipo_final} - {label}{_suf}{_ext}"
                                  ).replace("/", "-").replace("\\", "-")
                         out.append((_nome, f.type or "application/octet-stream", f.getvalue()))
                     return out
+
+                def _salvar_lote(linhas):
+                    """linhas: [(nome, motoboy_id|None, valor, files)] → 1 envio por motoboy."""
+                    tipo_final = "Outros" if eh_outros else tipo_doc
+                    enviados = faltando = 0
+                    for nome_i, mbid_i, val_i, files_i in linhas:
+                        if not nome_i or not files_i:
+                            if nome_i or files_i:
+                                faltando += 1
+                            continue
+                        arqs = _renomear(files_i, nome_i, tipo_final, periodo_label)
+                        vals = ([(mbid_i, tipo_final, round(float(val_i), 2))]
+                                if val_i and val_i > 0 else [])
+                        try:
+                            doc_id = db.salvar_prestacao(
+                                conn, ol_id, tipo_final, competencia, "individual",
+                                arqs, vals, usuario["id"], motoboy_nome=nome_i,
+                                periodo_ini=periodo_ini_s, periodo_fim=periodo_fim_s)
+                            db.auditar(conn, usuario["id"], "prestacao_contas", "documento",
+                                       doc_id, f"{nome_i} — {tipo_final} — {periodo_label}")
+                            enviados += 1
+                        except Exception as ex:
+                            st.error(f"Erro ao salvar '{nome_i}': {ex}")
+                    conn.commit()
+                    return enviados, faltando
 
                 # =====================================================================
                 # MODO: vários motoboys digitando o nome (sem precisar estar cadastrado)
@@ -1341,7 +1369,7 @@ def tela_ol(usuario):
                 if escopo.startswith("Vários"):
                     st.caption("Digite o nome de cada motoboy e anexe o(s) arquivo(s) dele. "
                                "Cria **um envio por motoboy** — ótimo para rescisões em lote.")
-                    qtd = st.number_input("Quantos motoboys?", 1, 30, 1, step=1, key="pc_multi_n")
+                    qtd = st.number_input("Quantos motoboys?", 1, 50, 1, step=1, key="pc_multi_n")
                     linhas_multi = []
                     for i in range(int(qtd)):
                         with st.container(border=True):
@@ -1355,40 +1383,75 @@ def tela_ol(usuario):
                             files_i = fcol.file_uploader(
                                 "Arquivo(s)", type=["pdf", "jpg", "jpeg", "png"],
                                 accept_multiple_files=True, key=f"pc_m_file_{i}")
-                            linhas_multi.append((nome_i.strip(), val_i, files_i))
+                            linhas_multi.append((nome_i.strip(), None, val_i, files_i))
 
                     if st.button("📤 Enviar documentos", type="primary",
                                  use_container_width=True, key="pc_enviar_multi"):
-                        tipo_final = "Outros" if eh_outros else tipo_doc
-                        competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
-                        enviados, faltando = 0, 0
-                        for nome_i, val_i, files_i in linhas_multi:
-                            if not nome_i or not files_i:
-                                if nome_i or files_i:
-                                    faltando += 1
-                                continue
-                            arqs = _renomear(files_i, nome_i, tipo_final, competencia)
-                            vals = ([(None, tipo_final, round(float(val_i), 2))]
-                                    if val_i and val_i > 0 else [])
-                            try:
-                                doc_id = db.salvar_prestacao(
-                                    conn, ol_id, tipo_final, competencia, "individual",
-                                    arqs, vals, usuario["id"], motoboy_nome=nome_i)
-                                db.auditar(conn, usuario["id"], "prestacao_contas",
-                                           "documento", doc_id,
-                                           f"{nome_i} — {tipo_final} — {competencia}")
-                                enviados += 1
-                            except Exception as ex:
-                                st.error(f"Erro ao salvar '{nome_i}': {ex}")
-                        conn.commit()
+                        enviados, faltando = _salvar_lote(linhas_multi)
                         if enviados:
-                            _msg = f"✅ {enviados} envio(s) criado(s) ({tipo_final} — {mes_sel}/{ano_sel})."
+                            _m = f"✅ {enviados} envio(s) criado(s) ({periodo_label})."
                             if faltando:
-                                _msg += f" {faltando} linha(s) incompleta(s) foram ignoradas."
-                            st.success(_msg)
+                                _m += f" {faltando} linha(s) sem nome/arquivo foram ignoradas."
+                            st.success(_m)
                             st.rerun()
                         else:
                             st.error("Preencha ao menos um **nome** com **arquivo**.")
+
+                # =====================================================================
+                # MODO: por unidade — auto-seleciona quem rodou na unidade no período
+                # =====================================================================
+                elif escopo.startswith("Por unidade"):
+                    lojas_all = conn.execute(
+                        "SELECT id, nome FROM lojas WHERE ativo=1 ORDER BY nome").fetchall()
+                    _mapa_loja = {l["nome"]: l["id"] for l in lojas_all}
+                    loja_sel = st.selectbox("Unidade", list(_mapa_loja.keys()), key="pc_uni")
+                    loja_id_sel = _mapa_loja.get(loja_sel)
+                    # motoboys da unidade: cadastrados ativos + quem passou na catraca no período
+                    nomes_uni = {}
+                    for r in conn.execute(
+                            "SELECT DISTINCT m.id AS id, m.nome AS nome FROM cadastros c "
+                            "JOIN motoboys m ON m.id=c.motoboy_id "
+                            "WHERE c.loja_id=? AND c.situacao='ativo'", (loja_id_sel,)).fetchall():
+                        nomes_uni[r["nome"]] = r["id"]
+                    _fim_excl = (_fim + timedelta(days=1)).strftime("%Y-%m-%d") + " 00:00:00"
+                    for e in conn.execute(
+                            "SELECT DISTINCT nome, motoboy_id FROM acesso_eventos "
+                            "WHERE loja_id=? AND tipo='entrada' AND ocorrido_em>=? "
+                            "AND ocorrido_em<?",
+                            (loja_id_sel, periodo_ini_s + " 00:00:00", _fim_excl)).fetchall():
+                        if e["nome"]:
+                            nomes_uni.setdefault(e["nome"], e["motoboy_id"])
+
+                    if not nomes_uni:
+                        st.info("Nenhum motoboy encontrado nesta unidade no período (nem "
+                                "cadastrado ativo, nem com passagem na catraca). Use **Vários "
+                                "motoboys (digitar nomes)** se preferir digitar.")
+                    else:
+                        st.caption(f"**{len(nomes_uni)} motoboy(s)** desta unidade no período. "
+                                   "Anexe o documento de cada um e envie todos juntos.")
+                        linhas_uni = []
+                        for j, (nm, mbid) in enumerate(sorted(nomes_uni.items())):
+                            with st.container(border=True):
+                                st.markdown(f"**{nm}**")
+                                vcol, fcol = st.columns([1, 2])
+                                val_j = vcol.number_input("Valor (R$) — 0 se não tiver",
+                                                          min_value=0.0, step=10.0, format="%.2f",
+                                                          key=f"pc_u_val_{j}")
+                                files_j = fcol.file_uploader(
+                                    "Arquivo(s)", type=["pdf", "jpg", "jpeg", "png"],
+                                    accept_multiple_files=True, key=f"pc_u_file_{j}")
+                                linhas_uni.append((nm, mbid, val_j, files_j))
+                        if st.button("📤 Enviar documentos da unidade", type="primary",
+                                     use_container_width=True, key="pc_enviar_uni"):
+                            enviados, faltando = _salvar_lote(linhas_uni)
+                            if enviados:
+                                _m = f"✅ {enviados} envio(s) da unidade {loja_sel} ({periodo_label})."
+                                if faltando:
+                                    _m += f" {faltando} sem arquivo foram ignorados."
+                                st.success(_m)
+                                st.rerun()
+                            else:
+                                st.error("Anexe o arquivo de ao menos um motoboy.")
 
                 # =====================================================================
                 # MODO: um motoboy cadastrado  /  geral (fluxo original)
@@ -1400,7 +1463,7 @@ def tela_ol(usuario):
                         mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
                         if not mapa_mb:
                             st.warning("Nenhum motoboy cadastrado. Use **Vários motoboys "
-                                       "(digitar nomes)** acima.")
+                                       "(digitar nomes)** ou **Por unidade** acima.")
                         else:
                             mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
                             mb_id_sel = mapa_mb[mb_nome]
@@ -1450,19 +1513,19 @@ def tela_ol(usuario):
                             valores = [(mid, t, round(float(v), 2))
                                        for mid, t, v in valores_pendentes if v and v > 0]
                             tipo_final = "Outros" if eh_outros else tipo_doc
-                            competencia = f"{ano_sel}-{MESES.index(mes_sel) + 1:02d}"
                             base_nome = mb_nome if escopo_db == "individual" else "Geral"
-                            arquivos_dados = _renomear(arquivos, base_nome, tipo_final, competencia)
+                            arquivos_dados = _renomear(arquivos, base_nome, tipo_final, periodo_label)
                             try:
                                 doc_id = db.salvar_prestacao(
                                     conn, ol_id, tipo_final, competencia, escopo_db,
                                     arquivos_dados, valores, usuario["id"],
-                                    motoboy_nome=(mb_nome if escopo_db == "individual" else None))
+                                    motoboy_nome=(mb_nome if escopo_db == "individual" else None),
+                                    periodo_ini=periodo_ini_s, periodo_fim=periodo_fim_s)
                                 db.auditar(conn, usuario["id"], "prestacao_contas",
                                            "documento", doc_id,
-                                           f"{tipo_final} — {competencia} ({len(arquivos_dados)} arq.)")
+                                           f"{tipo_final} — {periodo_label} ({len(arquivos_dados)} arq.)")
                                 conn.commit()
-                                st.success(f"✅ Enviado! ({tipo_final} — {mes_sel}/{ano_sel}) · "
+                                st.success(f"✅ Enviado! ({tipo_final} — {periodo_label}) · "
                                            f"{len(arquivos_dados)} arquivo(s)")
                                 st.rerun()
                             except Exception as ex:

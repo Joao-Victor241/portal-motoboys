@@ -1317,15 +1317,15 @@ def garantir_tabelas_prestacao(conn):
     # atrás da trava 1x/processo; quando o processo é reaproveitado após um deploy,
     # ela não roda e dá UndefinedColumn. Garante SEMPRE (idempotente). Se a tabela
     # ainda não existe (1º boot), o except ignora — a criação vem logo abaixo.
-    try:
-        if pg:
-            conn.execute("ALTER TABLE prestacao_documentos "
-                         "ADD COLUMN IF NOT EXISTS motoboy_nome TEXT")
-        else:
-            conn.execute("ALTER TABLE prestacao_documentos ADD COLUMN motoboy_nome TEXT")
-        conn.commit()
-    except Exception:
-        pass
+    for _cc in ("motoboy_nome TEXT", "periodo_ini TEXT", "periodo_fim TEXT"):
+        try:
+            if pg:
+                conn.execute(f"ALTER TABLE prestacao_documentos ADD COLUMN IF NOT EXISTS {_cc}")
+            else:
+                conn.execute(f"ALTER TABLE prestacao_documentos ADD COLUMN {_cc}")
+            conn.commit()
+        except Exception:
+            pass
     if _TABELAS_PRESTACAO_OK:
         return
     blob = "BYTEA" if pg else "BLOB"
@@ -1365,7 +1365,8 @@ def garantir_tabelas_prestacao(conn):
     _cols_arqs = [("status", "TEXT DEFAULT 'pendente'")] + _cols_val
     # motoboy_nome: nome digitado quando o motoboy NÃO está cadastrado (uso da
     # conferência antecipada, antes de as OLs cadastrarem).
-    _cols_doc = _cols_val + [("motoboy_nome", "TEXT")]
+    _cols_doc = _cols_val + [("motoboy_nome", "TEXT"),
+                             ("periodo_ini", "TEXT"), ("periodo_fim", "TEXT")]
     for tabela, colunas in (("prestacao_valores", _cols_valores),
                             ("prestacao_documentos", _cols_doc),
                             ("prestacao_arquivos", _cols_arqs)):
@@ -1397,21 +1398,22 @@ def set_config(conn, chave, valor):
 
 
 def salvar_prestacao(conn, ol_id, tipo, competencia, escopo, arquivos, valores,
-                     criado_por, motoboy_nome=None):
+                     criado_por, motoboy_nome=None, periodo_ini=None, periodo_fim=None):
     """Salva um documento de prestação de contas (com 1+ arquivos) + os valores.
     arquivos: lista de tuplas (nome, mime, bytes).
     valores:  lista de tuplas (motoboy_id, tipo, valor).
     motoboy_nome: nome livre do motoboy quando ele NÃO está cadastrado.
+    periodo_ini/periodo_fim: intervalo de datas (AAAA-MM-DD) de referência.
     Devolve o id do documento."""
     primeiro_nome = arquivos[0][0] if arquivos else None
     primeiro_mime = arquivos[0][1] if arquivos else None
     doc_id = _inserir_id(
         conn,
         "INSERT INTO prestacao_documentos "
-        "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, criado_por, motoboy_nome) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "(ol_id, tipo, competencia, escopo, nome_arquivo, mime, criado_por, motoboy_nome, "
+        "periodo_ini, periodo_fim) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (ol_id, tipo, competencia, escopo, primeiro_nome, primeiro_mime, criado_por,
-         motoboy_nome))
+         motoboy_nome, periodo_ini, periodo_fim))
     for nome, mime, dados in arquivos:
         conn.execute(
             "INSERT INTO prestacao_arquivos (documento_id, nome_arquivo, mime, arquivo) "
