@@ -2659,10 +2659,12 @@ def tela_admin(usuario):
 # ===========================================================================
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def _pdf_para_imagens(dados: bytes, dpi: int = 130, max_paginas: int = 25):
+@st.cache_data(show_spinner=False, max_entries=200)
+def _pdf_para_imagens(dados: bytes, dpi: int = 120, max_paginas: int = 25):
     """Renderiza as páginas de um PDF como PNG (no servidor) para exibir com st.image.
     Assim o PDF aparece em qualquer navegador, sem depender do visualizador nativo
-    (que o Streamlit bloqueia por rodar num iframe sandbox). Em cache pelos bytes."""
+    (que o Streamlit bloqueia por rodar num iframe sandbox). **Em cache pelos bytes**
+    — re-renderizações (reruns) são instantâneas, o que deixa a conferência ágil."""
     import fitz  # PyMuPDF
     doc = fitz.open(stream=dados, filetype="pdf")
     total = doc.page_count
@@ -2727,33 +2729,32 @@ def _bloco_validacao(conn, dados, mime, nome, cur, key_prefix, salvar_fn):
             else:
                 st.warning("Sem arquivo anexado.")
         with cval:
-            st.caption("Confira os itens (marque o que estiver OK):")
-            c1 = st.checkbox("Documento legível / completo",
-                             value=bool(cur.get("val_legivel")), key=f"leg_{key_prefix}")
-            c2 = st.checkbox("Assinatura / dados conferem",
-                             value=bool(cur.get("val_assinatura")), key=f"ass_{key_prefix}")
-            c3 = st.checkbox("Valor / competência conferem",
-                             value=bool(cur.get("val_valor")), key=f"val_{key_prefix}")
-            obs = st.text_area("Observação / motivo (aparece para a OL)",
-                               value=cur.get("obs_validacao") or "",
-                               key=f"obs_{key_prefix}", height=90)
-            if st.button("✅ Validar (aprovar documento)", type="primary",
-                         use_container_width=True, key=f"ok_{key_prefix}"):
+            # FORM: marcar os checks NÃO recarrega a página (só o botão confirma).
+            with st.form(f"form_{key_prefix}"):
+                st.caption("Confira os itens (marque o que estiver OK):")
+                c1 = st.checkbox("Documento legível e completo",
+                                 value=bool(cur.get("val_legivel")), key=f"leg_{key_prefix}")
+                c2 = st.checkbox("Assinatura e dados conferem",
+                                 value=bool(cur.get("val_assinatura")), key=f"ass_{key_prefix}")
+                c3 = st.checkbox("Data de emissão correta",
+                                 value=bool(cur.get("val_valor")), key=f"val_{key_prefix}")
+                obs = st.text_area("Observação / motivo (aparece para a OL)",
+                                   value=cur.get("obs_validacao") or "",
+                                   key=f"obs_{key_prefix}", height=80)
+                bok = st.form_submit_button("✅ Validar", type="primary",
+                                            use_container_width=True)
+                bcor = st.form_submit_button("✏️ Pedir correção / reenvio",
+                                             use_container_width=True)
+                brej = st.form_submit_button("❌ Rejeitar", use_container_width=True)
+            if bok:
                 salvar_fn(c1, c2, c3, "validado", obs.strip() or None)
-                st.toast("Documento validado ✅")
-                conn.close()
-                st.rerun()
-            if st.button("✏️ Pedir correção / reenvio", use_container_width=True,
-                         key=f"cor_{key_prefix}"):
+                st.toast("Documento validado ✅"); conn.close(); st.rerun()
+            elif bcor:
                 salvar_fn(c1, c2, c3, "correcao", obs.strip() or None)
-                st.toast("Correção solicitada ✏️")
-                conn.close()
-                st.rerun()
-            if st.button("❌ Rejeitar", use_container_width=True, key=f"rej_{key_prefix}"):
+                st.toast("Correção solicitada ✏️"); conn.close(); st.rerun()
+            elif brej:
                 salvar_fn(c1, c2, c3, "rejeitado", obs.strip() or None)
-                st.toast("Documento rejeitado ❌")
-                conn.close()
-                st.rerun()
+                st.toast("Documento rejeitado ❌"); conn.close(); st.rerun()
             if cur.get("validado_em"):
                 st.caption(f"Última ação em: {cur['validado_em']}")
 
@@ -3062,8 +3063,9 @@ def tela_conferencia(usuario):
 
     # ---- Documentos do selecionado ----------------------------------------
     cols_doc = ("pd.id, o.nome AS ol, pd.tipo, pd.competencia, pd.escopo, pd.status, "
-                "pd.criado_em, pd.motoboy_nome, pd.val_legivel, pd.val_assinatura, "
-                "pd.val_valor, pd.obs_validacao, pd.validado_em")
+                "pd.criado_em, pd.motoboy_nome, pd.periodo_ini, pd.periodo_fim, "
+                "pd.val_legivel, pd.val_assinatura, pd.val_valor, pd.obs_validacao, "
+                "pd.validado_em")
     if modo == "geral":
         docs = conn.execute(f"SELECT {cols_doc} {base_geral} ORDER BY pd.id DESC",
                             params_pd).fetchall()
@@ -3089,96 +3091,73 @@ def tela_conferencia(usuario):
         conn.close()
         return
 
-    # ---- Navegação (passar de um documento para o outro) ------------------
-    n = len(docs)
-    idx_key = f"fin_idx_{escolha}"
-    idx = max(0, min(st.session_state.get(idx_key, 0), n - 1))
-
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    if nav1.button("◀ Anterior", use_container_width=True, disabled=(idx <= 0),
-                   key="fin_prev"):
-        st.session_state[idx_key] = idx - 1
-        st.rerun()
-    nav2.markdown(f"<div style='text-align:center;padding-top:6px'>Documento "
-                  f"<b>{idx + 1}</b> de <b>{n}</b></div>", unsafe_allow_html=True)
-    if nav3.button("Próximo ▶", use_container_width=True, disabled=(idx >= n - 1),
-                   key="fin_next"):
-        st.session_state[idx_key] = idx + 1
-        st.rerun()
-
-    doc = docs[idx]
-    did = doc["id"]
-
-    # ---- Cabeçalho do documento -------------------------------------------
-    status_badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado",
-                    "correcao": "✏️ Correção solicitada"}.get(doc["status"], "🕒 Pendente")
-    st.markdown(f"### {doc['tipo']}  &nbsp; {status_badge}")
-    _mb_nome = doc["motoboy_nome"] or (escolha[2:] if escolha.startswith(("👤", "✍️")) else "")
-    meta = f"**OL:** {doc['ol']}  ·  **Competência:** {doc['competencia'] or '—'}  ·  " \
-           f"**Enviado em:** {(doc['criado_em'] or '')[:16].replace('T', ' ')}"
-    if _mb_nome:
-        meta = f"**Motoboy:** {_mb_nome}  ·  " + meta
-    st.markdown(meta)
-
-    # Valores referentes a este motoboy (ou totais, se grupo geral)
-    if mid is None:
-        vals = conn.execute(
-            "SELECT tipo, COALESCE(SUM(valor),0) AS v FROM prestacao_valores "
-            "WHERE documento_id=? GROUP BY tipo", (did,)).fetchall()
-    else:
-        vals = conn.execute(
-            "SELECT tipo, COALESCE(SUM(valor),0) AS v FROM prestacao_valores "
-            "WHERE documento_id=? AND motoboy_id=? GROUP BY tipo", (did, mid)).fetchall()
-    if vals:
-        total = sum((v["v"] or 0) for v in vals)
-        st.dataframe(
-            [{"Documento": v["tipo"] or doc["tipo"],
-              "Valor": f"R$ {(v['v'] or 0):.2f}"} for v in vals],
-            use_container_width=True, hide_index=True)
-        st.markdown(f"**Total referente:** R$ {total:.2f}")
-
+    # ---- TODOS os documentos do motoboy na MESMA página (sem paginação) ---
+    _mb_nome = docs[0]["motoboy_nome"] or escolha.split(" ", 1)[-1]
     st.divider()
+    st.markdown(f"### {_mb_nome} · {len(docs)} documento(s)")
+    st.caption("Todos os documentos deste motoboy nesta página. Marque os itens e clique em "
+               "**Validar / Correção / Rejeitar** — os checks só são gravados no clique (não "
+               "recarregam a cada marcação). Para ampliar, passe o mouse na imagem e clique "
+               "no ícone de **tela cheia**.")
 
-    # ---- Documentos do envio: conferência INDEPENDENTE por arquivo --------
-    # Cada arquivo é validado/rejeitado separadamente (ex.: 5 docs, 4 validados
-    # e 1 rejeitado). O status do envio é o resumo dos arquivos.
-    arqs = conn.execute(
-        "SELECT id, nome_arquivo, mime, arquivo, status, val_legivel, val_assinatura, "
-        "val_valor, obs_validacao, validado_em FROM prestacao_arquivos "
-        "WHERE documento_id=? ORDER BY id", (did,)).fetchall()
+    def _periodo_txt(d):
+        if d["periodo_ini"] and d["periodo_fim"]:
+            try:
+                pi = datetime.strptime(str(d["periodo_ini"])[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                pf = datetime.strptime(str(d["periodo_fim"])[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                return f"{pi} a {pf}"
+            except Exception:
+                pass
+        return d["competencia"] or "—"
 
-    if arqs:
-        st.markdown(f"#### 📄 Documentos deste envio ({len(arqs)}) — "
-                    "valide cada um separadamente")
-        for i, a in enumerate(arqs):
-            aid = a["id"]
-            nome = a["nome_arquivo"] or f"documento {i + 1}"
-            cur = {"status": a["status"], "val_legivel": a["val_legivel"],
-                   "val_assinatura": a["val_assinatura"], "val_valor": a["val_valor"],
-                   "obs_validacao": a["obs_validacao"], "validado_em": a["validado_em"]}
+    for doc in docs:
+        did = doc["id"]
+        badge = {"validado": "✅ Validado", "rejeitado": "❌ Rejeitado",
+                 "correcao": "✏️ Correção solicitada"}.get(doc["status"], "🕒 Pendente")
+        with st.container(border=True):
+            st.markdown(f"#### {doc['tipo']} &nbsp; {badge}")
+            _tot = conn.execute(
+                "SELECT COALESCE(SUM(valor),0) FROM prestacao_valores WHERE documento_id=?"
+                + ("" if mid is None else " AND motoboy_id=?"),
+                ((did,) if mid is None else (did, mid))).fetchone()[0] or 0
+            _meta = (f"**OL:** {doc['ol']} · **Período:** {_periodo_txt(doc)} · "
+                     f"**Enviado:** {(doc['criado_em'] or '')[:16].replace('T', ' ')}")
+            if _tot:
+                _meta += f" · **Valor:** R$ {_tot:.2f}"
+            st.caption(_meta)
 
-            def _salvar(leg, assi, vok, status, obs, _aid=aid):
-                db.validar_arquivo(conn, _aid, leg, assi, vok, status, obs, usuario["id"])
+            arqs = conn.execute(
+                "SELECT id, nome_arquivo, mime, arquivo, status, val_legivel, val_assinatura, "
+                "val_valor, obs_validacao, validado_em FROM prestacao_arquivos "
+                "WHERE documento_id=? ORDER BY id", (did,)).fetchall()
+            if arqs:
+                for i, a in enumerate(arqs):
+                    aid = a["id"]
+                    nome = a["nome_arquivo"] or f"documento {i + 1}"
+                    cur = {"status": a["status"], "val_legivel": a["val_legivel"],
+                           "val_assinatura": a["val_assinatura"], "val_valor": a["val_valor"],
+                           "obs_validacao": a["obs_validacao"], "validado_em": a["validado_em"]}
 
-            _bloco_validacao(conn, bytes(a["arquivo"]), a["mime"], nome, cur,
-                             f"fin_{did}_{aid}", _salvar)
-    else:
-        # Documento legado: 1 arquivo embutido no próprio registro do documento.
-        st.markdown("#### 📄 Documento")
-        leg = conn.execute(
-            "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos "
-            "WHERE id=? AND arquivo IS NOT NULL", (did,)).fetchone()
-        cur = {"status": doc["status"], "val_legivel": doc["val_legivel"],
-               "val_assinatura": doc["val_assinatura"], "val_valor": doc["val_valor"],
-               "obs_validacao": doc["obs_validacao"], "validado_em": doc["validado_em"]}
-        dados = bytes(leg["arquivo"]) if leg else None
-        nome = (leg["nome_arquivo"] if leg else None) or doc["tipo"]
+                    def _salvar(leg, assi, vok, status, obs, _aid=aid):
+                        db.validar_arquivo(conn, _aid, leg, assi, vok, status, obs, usuario["id"])
 
-        def _salvar_doc(leg_, assi, vok, status, obs):
-            db.validar_documento(conn, did, leg_, assi, vok, status, obs, usuario["id"])
+                    _bloco_validacao(conn, bytes(a["arquivo"]), a["mime"], nome, cur,
+                                     f"fin_{did}_{aid}", _salvar)
+            else:
+                leg = conn.execute(
+                    "SELECT nome_arquivo, mime, arquivo FROM prestacao_documentos "
+                    "WHERE id=? AND arquivo IS NOT NULL", (did,)).fetchone()
+                cur = {"status": doc["status"], "val_legivel": doc["val_legivel"],
+                       "val_assinatura": doc["val_assinatura"], "val_valor": doc["val_valor"],
+                       "obs_validacao": doc["obs_validacao"], "validado_em": doc["validado_em"]}
+                dados = bytes(leg["arquivo"]) if leg else None
+                nome = (leg["nome_arquivo"] if leg else None) or doc["tipo"]
 
-        _bloco_validacao(conn, dados, leg["mime"] if leg else None, nome, cur,
-                         f"fin_{did}_leg", _salvar_doc)
+                def _salvar_doc(leg_, assi, vok, status, obs, _did=did):
+                    db.validar_documento(conn, _did, leg_, assi, vok, status, obs, usuario["id"])
+
+                _bloco_validacao(conn, dados, leg["mime"] if leg else None, nome, cur,
+                                 f"fin_{did}_leg", _salvar_doc)
 
     conn.close()
 
