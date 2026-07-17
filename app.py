@@ -1302,85 +1302,114 @@ def tela_ol(usuario):
 
             with st.container(border=True):
                 st.markdown("**Enviar novo documento**")
-                tipo_doc = st.selectbox("Tipo de documento", TIPOS_DOC + [OUTROS], key="pc_tipo")
-                tipo_final = "Outros" if tipo_doc == OUTROS else tipo_doc
+                mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
 
-                # Período de referência: intervalo "de ... até ..."
-                cd1, cd2 = st.columns(2)
-                _ini = cd1.date_input("De", value=HOJE.replace(day=1), key="pc_de",
-                                      format="DD/MM/YYYY")
-                _fim = cd2.date_input("Até", value=HOJE, key="pc_ate", format="DD/MM/YYYY")
-                if _fim < _ini:
-                    st.warning("A data final é anterior à inicial — ajuste o período.")
-                competencia = _ini.strftime("%Y-%m")            # mantém agrupamento mensal
-                periodo_ini_s = _ini.strftime("%Y-%m-%d")
-                periodo_fim_s = _fim.strftime("%Y-%m-%d")
-                periodo_label = f"{_ini.strftime('%d-%m-%Y')} a {_fim.strftime('%d-%m-%Y')}"
-
+                # Escopo FICA FORA do formulário (para os campos abaixo trocarem
+                # reativamente conforme a opção escolhida).
                 escopo = st.radio(
-                    "Este documento é de:",
-                    ["Vários motoboys", "Por unidade", "Geral", "Um motoboy (cadastrado)"],
+                    "Este envio é de:",
+                    ["Selecionar motoboys (do cadastro)", "Vários motoboys (digitar nomes)",
+                     "Por unidade", "Geral"],
                     key="pc_escopo")
-                st.caption("Em **Vários motoboys**, **Por unidade** e **Geral** é **um único "
-                           "arquivo** com os documentos de todos os motoboys juntos.")
+                st.caption("É **um único arquivo** com os documentos dos motoboys escolhidos. "
+                           "Marque os tipos, selecione os motoboys e clique em Enviar — nada "
+                           "recarrega enquanto você preenche (só ao enviar).")
 
-                def _renomear(files, base, tipo_f, label):
-                    out, total = [], len(files)
-                    for _i, f in enumerate(files):
-                        _ext = os.path.splitext(f.name)[1] or ""
-                        _suf = f" ({_i + 1})" if total > 1 else ""
-                        _nome = (f"{base} - {tipo_f} - {label}{_suf}{_ext}"
-                                 ).replace("/", "-").replace("\\", "-")
-                        out.append((_nome, f.type or "application/octet-stream", f.getvalue()))
-                    return out
+                # TODO o resto vai num FORM: marcar checks/selecionar NÃO recarrega —
+                # só o botão de envio processa (deixa a página rápida e sem travar).
+                with st.form("pc_envio"):
+                    st.markdown("**Quais documentos estão neste arquivo?** (marque um ou mais)")
+                    _cols_tp = st.columns(3)
+                    tipos_marcados = []
+                    for _i, _t in enumerate(TIPOS_DOCUMENTO):
+                        if _cols_tp[_i % 3].checkbox(_t, key=f"pc_tp_{_i}"):
+                            tipos_marcados.append(_t)
 
-                # Define o rótulo (motoboy_nome) e o escopo — os 3 modos = 1 documento.
-                mb_id_sel, mb_label, escopo_db, pode_enviar = None, None, "geral", True
-                if escopo.startswith("Vários"):
-                    _desc = st.text_input("Motoboys incluídos (opcional)", key="pc_varios_desc",
-                                          placeholder="ex.: João, Maria, Pedro")
-                    mb_label = _desc.strip() or "Vários motoboys"
-                elif escopo.startswith("Por unidade"):
-                    _opts = [l["nome"] for l in lojas]
-                    loja_sel = st.selectbox("Unidade", _opts, key="pc_uni") if _opts else None
-                    mb_label = f"Unidade: {loja_sel}" if loja_sel else "Unidade"
-                elif escopo.startswith("Geral"):
-                    mb_label = None
-                else:                                            # Um motoboy (cadastrado)
-                    escopo_db = "individual"
-                    mapa_mb = {m["nome"]: m["id"] for m in motoboys_ol}
-                    if not mapa_mb:
-                        st.warning("Nenhum motoboy cadastrado. Use **Vários motoboys**, "
-                                   "**Por unidade** ou **Geral**.")
-                        pode_enviar = False
+                    st.divider()
+                    sel_nomes, desc_nomes, loja_sel = [], "", None
+                    if escopo.startswith("Selecionar"):
+                        sel_nomes = st.multiselect(
+                            "Motoboys (do cadastro)", list(mapa_mb.keys()), key="pc_selmb",
+                            help="O arquivo será vinculado a todos os motoboys marcados.")
+                    elif escopo.startswith("Vários"):
+                        desc_nomes = st.text_input(
+                            "Motoboys incluídos (opcional)", key="pc_varios_desc",
+                            placeholder="ex.: João, Maria, Pedro")
+                    elif escopo.startswith("Por unidade"):
+                        _opts = [l["nome"] for l in lojas]
+                        loja_sel = st.selectbox("Unidade", _opts, key="pc_uni") if _opts else None
+
+                    cd1, cd2 = st.columns(2)
+                    _ini = cd1.date_input("De", value=HOJE.replace(day=1), key="pc_de",
+                                          format="DD/MM/YYYY")
+                    _fim = cd2.date_input("Até", value=HOJE, key="pc_ate", format="DD/MM/YYYY")
+                    valor = st.number_input("Valor total (R$) — 0 se não tiver", min_value=0.0,
+                                            step=10.0, format="%.2f", key="pc_valor")
+                    arquivos = st.file_uploader(
+                        "Arquivo(s) (PDF ou imagem) — pode anexar mais de um",
+                        type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True,
+                        key="pc_file")
+                    enviar = st.form_submit_button("📤 Enviar documento", type="primary",
+                                                   use_container_width=True)
+
+                if enviar:
+                    sel_ids = [mapa_mb[n] for n in sel_nomes if n in mapa_mb]
+                    competencia = _ini.strftime("%Y-%m")
+                    periodo_ini_s = _ini.strftime("%Y-%m-%d")
+                    periodo_fim_s = _fim.strftime("%Y-%m-%d")
+                    periodo_label = f"{_ini.strftime('%d-%m-%Y')} a {_fim.strftime('%d-%m-%Y')}"
+                    erro = None
+                    if _fim < _ini:
+                        erro = "A data final é anterior à inicial."
+                    elif not tipos_marcados:
+                        erro = "Marque ao menos um tipo de documento."
+                    elif escopo.startswith("Selecionar") and not sel_ids:
+                        erro = "Selecione ao menos um motoboy."
+                    elif not arquivos:
+                        erro = "Anexe ao menos um arquivo."
+                    if erro:
+                        st.error(erro)
                     else:
-                        mb_nome = st.selectbox("Motoboy", list(mapa_mb.keys()), key="pc_mb")
-                        mb_id_sel = mapa_mb[mb_nome]
-                        mb_label = mb_nome
+                        tipo_final = (tipos_marcados[0] if len(tipos_marcados) == 1
+                                      else "Vários documentos")
+                        if escopo.startswith("Selecionar"):
+                            escopo_db = "individual"
+                            mb_label = (", ".join(sel_nomes) if len(sel_nomes) <= 3
+                                        else f"{len(sel_nomes)} motoboys")
+                        elif escopo.startswith("Vários"):
+                            escopo_db, mb_label = "geral", (desc_nomes.strip() or "Vários motoboys")
+                        elif escopo.startswith("Por unidade"):
+                            escopo_db = "geral"
+                            mb_label = f"Unidade: {loja_sel}" if loja_sel else "Unidade"
+                        else:
+                            escopo_db, mb_label = "geral", None
 
-                valor = st.number_input("Valor total (R$) — 0 se não tiver", min_value=0.0,
-                                        step=10.0, format="%.2f", key="pc_valor")
-                arquivos = st.file_uploader(
-                    "Arquivo(s) (PDF ou imagem) — pode anexar mais de um",
-                    type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True, key="pc_file")
+                        base = mb_label or "Geral"
+                        arqs = []
+                        _tot = len(arquivos)
+                        for _k, f in enumerate(arquivos):
+                            _ext = os.path.splitext(f.name)[1] or ""
+                            _suf = f" ({_k + 1})" if _tot > 1 else ""
+                            _nm = (f"{base} - {tipo_final} - {periodo_label}{_suf}{_ext}"
+                                   ).replace("/", "-").replace("\\", "-")
+                            arqs.append((_nm, f.type or "application/octet-stream", f.getvalue()))
 
-                if st.button("📤 Enviar documento", type="primary", use_container_width=True,
-                             disabled=not pode_enviar):
-                    if not arquivos:
-                        st.error("Anexe ao menos um arquivo.")
-                    else:
-                        base_nome = mb_label or "Geral"
-                        arqs = _renomear(arquivos, base_nome, tipo_final, periodo_label)
-                        vals = ([(mb_id_sel, tipo_final, round(float(valor), 2))]
-                                if valor and valor > 0 else [])
+                        # Vincula CADA motoboy selecionado a CADA tipo (marca "enviado"
+                        # na relação); guarda o valor total uma vez.
+                        vals = []
+                        if escopo.startswith("Selecionar"):
+                            for _mid in sel_ids:
+                                for _t in tipos_marcados:
+                                    vals.append((_mid, _t, 0.0))
+                        if valor and valor > 0:
+                            vals.append((None, tipo_final, round(float(valor), 2)))
                         try:
                             doc_id = db.salvar_prestacao(
                                 conn, ol_id, tipo_final, competencia, escopo_db, arqs, vals,
                                 usuario["id"], motoboy_nome=mb_label,
                                 periodo_ini=periodo_ini_s, periodo_fim=periodo_fim_s)
                             db.auditar(conn, usuario["id"], "prestacao_contas", "documento",
-                                       doc_id,
-                                       f"{mb_label or 'Geral'} — {tipo_final} — {periodo_label}")
+                                       doc_id, f"{base} — {tipo_final} — {periodo_label}")
                             conn.commit()
                             st.success(f"✅ Enviado! ({tipo_final} — {periodo_label}) · "
                                        f"{len(arqs)} arquivo(s)")
