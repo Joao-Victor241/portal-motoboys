@@ -1318,12 +1318,27 @@ def tela_ol(usuario):
                 # TODO o resto vai num FORM: marcar checks/selecionar NÃO recarrega —
                 # só o botão de envio processa (deixa a página rápida e sem travar).
                 with st.form("pc_envio"):
-                    st.markdown("**Quais documentos estão neste arquivo?** (marque um ou mais)")
+                    # Lista de tipos = os OBRIGATÓRIOS definidos pelo admin (para esta OL);
+                    # se o admin ainda não definiu, cai na lista completa.
+                    _tipos_lista = obrigatorios or TIPOS_DOCUMENTO
+                    if obrigatorios:
+                        st.markdown("**Quais documentos estão neste arquivo?** — marque os "
+                                    "**obrigatórios** definidos pelo Grupo Bueno (um ou mais)")
+                    else:
+                        st.markdown("**Quais documentos estão neste arquivo?** (marque um ou mais)")
                     _cols_tp = st.columns(3)
                     tipos_marcados = []
-                    for _i, _t in enumerate(TIPOS_DOCUMENTO):
+                    for _i, _t in enumerate(_tipos_lista):
                         if _cols_tp[_i % 3].checkbox(_t, key=f"pc_tp_{_i}"):
                             tipos_marcados.append(_t)
+                    # Tipos extras (não obrigatórios) — ficam num expander, opcional.
+                    _extras = [t for t in TIPOS_DOCUMENTO if t not in _tipos_lista]
+                    if obrigatorios and _extras:
+                        with st.expander("➕ Outros documentos (não obrigatórios)"):
+                            _colsx = st.columns(3)
+                            for _j, _t in enumerate(_extras):
+                                if _colsx[_j % 3].checkbox(_t, key=f"pc_tpx_{_j}"):
+                                    tipos_marcados.append(_t)
 
                     st.divider()
                     sel_nomes, desc_nomes, loja_sel = [], "", None
