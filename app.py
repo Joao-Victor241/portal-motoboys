@@ -1308,8 +1308,7 @@ def tela_ol(usuario):
                 # reativamente conforme a opção escolhida).
                 escopo = st.radio(
                     "Este envio é de:",
-                    ["Selecionar motoboys (do cadastro)", "Vários motoboys (digitar nomes)",
-                     "Por unidade", "Geral"],
+                    ["Selecionar motoboys (do cadastro)", "Por unidade", "Geral"],
                     key="pc_escopo")
                 st.caption("É **um único arquivo** com os documentos dos motoboys escolhidos. "
                            "Marque os tipos, selecione os motoboys e clique em Enviar — nada "
@@ -1341,15 +1340,11 @@ def tela_ol(usuario):
                                     tipos_marcados.append(_t)
 
                     st.divider()
-                    sel_nomes, desc_nomes, loja_sel = [], "", None
+                    sel_nomes, loja_sel = [], None
                     if escopo.startswith("Selecionar"):
                         sel_nomes = st.multiselect(
                             "Motoboys (do cadastro)", list(mapa_mb.keys()), key="pc_selmb",
                             help="O arquivo será vinculado a todos os motoboys marcados.")
-                    elif escopo.startswith("Vários"):
-                        desc_nomes = st.text_input(
-                            "Motoboys incluídos (opcional)", key="pc_varios_desc",
-                            placeholder="ex.: João, Maria, Pedro")
                     elif escopo.startswith("Por unidade"):
                         _opts = [l["nome"] for l in lojas]
                         loja_sel = st.selectbox("Unidade", _opts, key="pc_uni") if _opts else None
@@ -1391,8 +1386,6 @@ def tela_ol(usuario):
                             escopo_db = "individual"
                             mb_label = (", ".join(sel_nomes) if len(sel_nomes) <= 3
                                         else f"{len(sel_nomes)} motoboys")
-                        elif escopo.startswith("Vários"):
-                            escopo_db, mb_label = "geral", (desc_nomes.strip() or "Vários motoboys")
                         elif escopo.startswith("Por unidade"):
                             escopo_db = "geral"
                             mb_label = f"Unidade: {loja_sel}" if loja_sel else "Unidade"
